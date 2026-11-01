@@ -284,3 +284,50 @@ fn pc_reanims_parse_and_images_exist() {
         "reanims reference missing images: {missing:?}"
     );
 }
+
+/// Every PC font descriptor parses and its glyphs fit on their pages.
+#[test]
+fn pc_fonts_parse_and_fit_their_images() {
+    let Some(dir) = std::env::var_os("RPVZ_TEST_PC_ASSETS").map(PathBuf::from) else {
+        eprintln!("RPVZ_TEST_PC_ASSETS not set; skipping");
+        return;
+    };
+    let data = dir.join("data");
+    let mut count = 0;
+    for e in std::fs::read_dir(&data).unwrap() {
+        let path = e.unwrap().path();
+        if path.extension().is_none_or(|x| x != "txt") {
+            continue;
+        }
+        let font = rpvz_formats::ImageFont::parse(&std::fs::read(&path).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        for layer in &font.layers {
+            assert!(
+                !layer.glyphs.is_empty(),
+                "{}: layer {} has no glyphs",
+                path.display(),
+                layer.name
+            );
+            let stem = layer.image.to_ascii_lowercase();
+            let page = ["png", "gif", "jpg"]
+                .iter()
+                .flat_map(|ext| [format!("{stem}.{ext}"), format!("_{stem}.{ext}")])
+                .map(|f| data.join(f))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| panic!("{}: no image for {}", path.display(), layer.image));
+            let (w, h) = image::image_dimensions(&page).unwrap();
+            for (c, g) in &layer.glyphs {
+                let [x, y, gw, gh] = g.rect;
+                assert!(
+                    x >= 0 && y >= 0 && x + gw <= w as i32 && y + gh <= h as i32,
+                    "{}: {c:?} rect {:?} outside {w}x{h}",
+                    path.display(),
+                    g.rect
+                );
+            }
+        }
+        assert!(font.text_width("Hello") > 0, "{}", path.display());
+        count += 1;
+    }
+    assert_eq!(count, 20);
+}

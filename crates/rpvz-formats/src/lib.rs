@@ -10,6 +10,7 @@
 //! No Bevy here: everything is plain data, so it is easy to test.
 
 pub mod error;
+pub mod font;
 pub mod image_ids;
 pub mod ptx;
 mod read;
@@ -18,6 +19,7 @@ pub mod rsb;
 mod trie;
 
 pub use error::{FormatError, Result};
+pub use font::ImageFont;
 pub use image_ids::ImageIdTable;
 pub use ptx::{PixelFormat, RgbaImage};
 pub use reanim::{Frame, ImageRef, Reanim, Track, Variant};
