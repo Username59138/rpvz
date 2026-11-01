@@ -22,6 +22,8 @@ const SIGN_COLOR: Color = Color::srgb(1.0, 0.96, 0.78);
 /// Track carrying the name, and the plank that opens the rename dialog.
 const NAME_TRACK: &str = "woodsign1";
 const RENAME_TRACK: &str = "woodsign2";
+/// Where the name's centre sits on the sign image, as fractions of its size.
+const NAME_CENTRE: Vec2 = Vec2::new(0.5, 0.737);
 
 #[derive(Resource, Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Profiles {
@@ -255,6 +257,7 @@ fn handle_results(
 fn place_sign_name(
     cfg: Res<Config>,
     mut cache: ResMut<ImageCache>,
+    mut fonts: ResMut<crate::text::FontCache>,
     library: Res<crate::library::Library>,
     mut images: ResMut<Assets<Image>>,
     players: Query<(&ReanimPlayer, &ReanimOrigin), With<MenuRoot>>,
@@ -277,10 +280,19 @@ fn place_sign_name(
             .size
             .as_vec2();
         let q = quad(&frame, size, origin.0);
-        // A point a bit below the middle of the plank, on the sign's axes.
-        let at = q[0] + (q[1] - q[0]) * 0.5 + (q[3] - q[0]) * 0.62;
-        let angle = (q[1] - q[0]).to_angle();
-        Some((at, angle))
+        let (across, down) = (q[1] - q[0], q[3] - q[0]);
+        // Centre of the free space under the painted greeting, as a fraction
+        // of the sign image (measured on the PC art: board rows 60..131 of
+        // 150, greeting rows 78..89).
+        let centre = q[0] + across * NAME_CENTRE.x + down * NAME_CENTRE.y;
+        // The text's origin is its baseline: drop it by about half the
+        // letter height so the letters sit centred on that point.
+        let ascent = fonts
+            .get(SIGN_FONT, &library, &mut images, !cfg.boxes)
+            .map_or(12.0, |f| f.ascent());
+        let scale = down.length() / size.y.max(1.0);
+        let baseline = centre + down.normalize_or_zero() * ascent * 0.35 * scale;
+        Some((baseline, across.to_angle()))
     })();
     text.color = SIGN_COLOR;
     match placed {

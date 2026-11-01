@@ -403,6 +403,10 @@ fn dialog_buttons(
             .edit
             .and_then(|e| fields.get(e).ok())
             .map(|f| f.text.trim().to_owned());
+        // OK on an empty edit box does nothing: the dialog stays open.
+        if button == ButtonRole::Ok && text.as_deref() == Some("") {
+            return;
+        }
         info!("dialog {:?}: {button:?} {text:?}", dialog.kind);
         results.0.push(DialogResult {
             kind: dialog.kind,
