@@ -54,14 +54,14 @@ cargo run -p rpvz-assets -- verify          # re-hash installed files
 
 ```sh
 RPVZ_TEST_ASSETS=/path/to/android/obb RPVZ_TEST_PC_ASSETS=~/.local/share/rpvz/assets/pc \
-  cargo test --release
+  cargo test --release --workspace
 ```
 
 ## Running the game
 
 ```sh
-cargo run --release -p rpvz-game              # uses the installed assets
-cargo run --release -p rpvz-game -- --help
+cargo run --release              # starts the game with the installed assets
+cargo run --release -- --help
 ```
 
 So far there is the main menu (buttons, hover, the click on Start Adventure).
@@ -81,8 +81,8 @@ libudev-dev libasound2-dev pkg-config`.
 ## Building
 
 ```sh
-cargo build --release
-cargo test
+cargo build --release --workspace
+cargo test --workspace
 ```
 
 ## License
