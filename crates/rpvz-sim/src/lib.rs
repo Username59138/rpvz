@@ -68,8 +68,15 @@ pub struct Plant {
     pub col: usize,
     pub row: usize,
     pub health: i32,
-    /// Ticks until the next shot is allowed.
+    /// Ticks until the next look for a target.
     pub launch_counter: i32,
+    /// Counts down through a shot; the pea leaves at
+    /// [`consts::SHOOTING_FIRE_AT`]. Zero when not shooting.
+    pub shooting: u32,
+    /// Body idle animation: frames per second and share of the loop played.
+    /// The pea starts from the stem, which sways with it.
+    pub anim_rate: f32,
+    pub anim_time: f32,
 }
 
 impl Plant {
@@ -108,6 +115,8 @@ pub struct Pea {
     pub id: Id,
     pub row: usize,
     pub x: f32,
+    /// Top of the pea image (drawing only; peas fly level).
+    pub y: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -154,15 +163,26 @@ pub enum Event {
     SunExpired(Id),
     Planted(Id),
     PlantEaten(Id),
-    Shot { plant: Id, pea: Id },
-    PeaHit { pea: Id, zombie: Id },
+    /// A plant found a target and started its shooting animation.
+    ShootStarted(Id),
+    Shot {
+        plant: Id,
+        pea: Id,
+    },
+    PeaHit {
+        pea: Id,
+        zombie: Id,
+    },
     ZombieSpawned(Id),
     ArmLost(Id),
     HeadLost(Id),
     ZombieDied(Id),
     ZombieRemoved(Id),
     MowerStarted(usize),
-    WaveStarted { wave: u32, last: bool },
+    WaveStarted {
+        wave: u32,
+        last: bool,
+    },
     GameOver(Outcome),
 }
 
@@ -237,6 +257,17 @@ pub struct Sim {
     sky_sun_countdown: u32,
     suns_fallen: u32,
     next_id: Id,
+    stem: Option<Vec<(f32, f32)>>,
+}
+
+/// The original's `GetRectOverlap` on the x axis: how far `[a0, a1)` and
+/// `[b0, b1)` overlap (negative: the gap between them).
+fn overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    let (mut end, other_end, start) = if a0 < b0 { (a1, b1, b0) } else { (b1, a1, a0) };
+    if end > start && end > other_end {
+        end = other_end;
+    }
+    end - start
 }
 
 impl Sim {
@@ -279,6 +310,7 @@ impl Sim {
             sky_sun_countdown: sky,
             suns_fallen: 0,
             next_id: 1,
+            stem: None,
         }
     }
 
@@ -331,13 +363,18 @@ impl Sim {
         self.seeds[seed].ready_at = self.tick + kind.recharge();
         self.seeds[seed].last_planted = Some(self.tick);
         let id = self.id();
+        let launch_counter = self.rng.range_i32(0, PEASHOOTER_LAUNCH_RATE);
+        let anim_rate = self.rng.range_f32(PLANT_IDLE_RATE_MIN, PLANT_IDLE_RATE_MAX);
         self.plants.push(Plant {
             id,
             kind,
             col,
             row,
             health: PLANT_HEALTH,
-            launch_counter: PEASHOOTER_LAUNCH_RATE,
+            launch_counter,
+            shooting: 0,
+            anim_rate,
+            anim_time: 0.0,
         });
         self.events.push(Event::Planted(id));
         Ok(id)
@@ -483,50 +520,99 @@ impl Sim {
     }
 
     fn update_plants(&mut self) {
-        let mut shots = Vec::new();
-        for p in &mut self.plants {
+        let mut fire = Vec::new();
+        let mut started = Vec::new();
+        let idle_frames = self
+            .stem
+            .as_ref()
+            .map_or(DEFAULT_IDLE_FRAMES, Vec::len)
+            .max(1);
+        for i in 0..self.plants.len() {
+            let p = &mut self.plants[i];
+            // Shot in progress first, as the original does.
+            if p.shooting > 0 {
+                p.shooting -= 1;
+                if p.shooting == SHOOTING_FIRE_AT {
+                    fire.push(i);
+                }
+            }
             p.launch_counter -= 1;
-            if p.launch_counter > 0 {
-                continue;
+            if p.launch_counter <= 0 {
+                let jitter = self.rng.below(LAUNCH_JITTER) as i32;
+                let p = &mut self.plants[i];
+                p.launch_counter = PEASHOOTER_LAUNCH_RATE - jitter;
+                let range = p.left() + SHOOTER_RANGE_DX;
+                let row = p.row;
+                let target = self.zombies.iter().any(|z| {
+                    z.row == row
+                        && !matches!(z.state, ZombieState::Dead { .. })
+                        && overlap(
+                            range,
+                            range + SHOOTER_RANGE,
+                            z.x.floor(),
+                            z.x.floor() + ZOMBIE_WIDTH,
+                        ) >= 0.0
+                });
+                if target {
+                    p.shooting = PEASHOOTER_SHOOTING_TICKS;
+                    started.push(p.id);
+                }
             }
-            let x = p.left();
-            let target = self.zombies.iter().any(|z| {
-                z.row == p.row
-                    && !matches!(z.state, ZombieState::Dead { .. })
-                    && z.x + ZOMBIE_WIDTH > x
-                    && z.x < BOARD_W
-            });
-            if target {
-                shots.push((p.id, p.row, x + PEA_SPAWN_DX));
-                p.launch_counter = PEASHOOTER_LAUNCH_RATE;
-            } else {
-                // Keep checking every tick until something shows up.
-                p.launch_counter = 0;
-            }
+            let p = &mut self.plants[i];
+            p.anim_time =
+                (p.anim_time + p.anim_rate / TICKS_PER_SECOND as f32 / idle_frames as f32).fract();
         }
-        for (plant, row, x) in shots {
-            let jitter = self.rng.below(LAUNCH_JITTER as u32 + 1) as i32;
-            if let Some(p) = self.plants.iter_mut().find(|p| p.id == plant) {
-                p.launch_counter -= jitter;
-            }
+        for id in started {
+            self.events.push(Event::ShootStarted(id));
+        }
+        for i in fire {
+            let p = &self.plants[i];
+            let (sx, sy) = self.stem_at(p.anim_time);
+            let x = (p.left() as i32 + sx as i32 + PEA_ORIGIN_DX) as f32;
+            let y = (Self::row_y(p.row) as i32 + sy as i32 + PEA_ORIGIN_DY) as f32;
+            let (plant, row) = (p.id, p.row);
             let id = self.id();
-            self.peas.push(Pea { id, row, x });
+            self.peas.push(Pea { id, row, x, y });
             self.events.push(Event::Shot { plant, pea: id });
         }
+    }
+
+    /// Stem position (relative to the plant's top-left) at a point of the
+    /// idle loop.
+    fn stem_at(&self, time: f32) -> (f32, f32) {
+        match &self.stem {
+            Some(frames) if frames.len() > 1 => {
+                let pos = time * (frames.len() - 1) as f32;
+                let i = (pos.floor() as usize).min(frames.len() - 2);
+                let t = pos - i as f32;
+                let (a, b) = (frames[i], frames[i + 1]);
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+            }
+            _ => DEFAULT_STEM,
+        }
+    }
+
+    /// Gives the Peashooter's stem positions over its idle loop (from the
+    /// game's animation), so peas start where the head really is.
+    pub fn set_stem(&mut self, frames: Vec<(f32, f32)>) {
+        self.stem = Some(frames);
     }
 
     fn update_peas(&mut self) {
         let mut hits = Vec::new();
         for pea in &mut self.peas {
             pea.x += PEA_SPEED;
+            // Positions are whole pixels when rectangles are compared.
+            let left = (pea.x as i32 + PEA_RECT_DX) as f32;
+            let right = left + PEA_RECT_W as f32;
             let target = self
                 .zombies
                 .iter()
                 .filter(|z| {
+                    let zl = z.x.floor();
                     z.row == pea.row
                         && !matches!(z.state, ZombieState::Dead { .. })
-                        && pea.x + PEA_WIDTH >= z.x
-                        && pea.x <= z.x + ZOMBIE_WIDTH
+                        && overlap(left, right, zl, zl + ZOMBIE_WIDTH) > 0.0
                 })
                 .min_by(|a, b| a.x.total_cmp(&b.x));
             if let Some(z) = target {
@@ -610,7 +696,7 @@ impl Sim {
                     }
                 }
             }
-            if !z.has_head {
+            if !z.has_head && self.rng.below(HEADLESS_DECAY_CHANCE) == 0 {
                 decayed.push(z.id);
             }
         }

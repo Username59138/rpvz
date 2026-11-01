@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::math::Affine2;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use rpvz_formats::reanim::{Frame, ImageRef, Reanim};
@@ -65,7 +66,7 @@ fn tick_clock(time: Res<Time>, cfg: Res<Config>, mut clock: ResMut<Clock>) {
 /// A parsed reanim with frames resolved and animation ranges found.
 pub struct ReanimDef {
     pub reanim: Arc<Reanim>,
-    frames: Vec<Vec<Frame>>,
+    pub frames: Vec<Vec<Frame>>,
     ranges: HashMap<String, (usize, usize)>,
     /// Tracks that draw something (have an image on some frame).
     visual: Vec<usize>,
@@ -136,15 +137,47 @@ impl ReanimDef {
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub range: (usize, usize),
-    /// Frames since the start of `range`.
+    /// Share of the range played, 0..=1 (the original's `mAnimTime`): a
+    /// range of `n` frames spans `n - 1` frame steps, so a loop never blends
+    /// its last frame into its first.
     pub time: f32,
+    /// Frames per second; `None` uses the definition's.
+    pub rate: Option<f32>,
     pub looping: bool,
     /// A non-looping range that reached its last frame and holds it.
     pub finished: bool,
     /// Tracks of a layer that hasn't started are hidden.
     pub started: bool,
+    /// Completed loops (1 once a non-looping range has ended).
+    pub loops: u32,
     /// Played once the current non-looping range ends.
     pub next: Option<(String, bool)>,
+}
+
+/// Draws an instance relative to a track of another one, like the
+/// original's attached reanimations (a peashooter's head rides its stem):
+/// its tracks get `parent track now × base⁻¹`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ReanimAttach {
+    pub parent: Entity,
+    pub track: usize,
+    /// Inverse of the parent track's transform on its base-pose frame.
+    pub base_inv: Affine2,
+}
+
+impl ReanimAttach {
+    /// Attaches to `track` of `parent`, taking the first frame of the
+    /// parent's current animation as the base pose (`mFrameBasePose`).
+    pub fn new(parent: Entity, player: &ReanimPlayer, track: &str) -> Option<Self> {
+        let track = player.def.track_index(track)?;
+        let start = player.layer_of(track).range.0;
+        let frame = player.def.frames[track].get(start)?;
+        Some(Self {
+            parent,
+            track,
+            base_inv: affine(frame).inverse(),
+        })
+    }
 }
 
 impl Layer {
@@ -152,21 +185,31 @@ impl Layer {
         Self {
             range,
             time: 0.0,
+            rate: None,
             looping,
             finished: false,
             started: true,
+            loops: 0,
             next: None,
         }
     }
 
-    fn position(&self) -> f32 {
-        let len = (self.range.1 - self.range.0 + 1) as f32;
-        if self.looping {
-            self.time.rem_euclid(len)
-        } else {
-            self.time.min(len - 1.0)
-        }
+    fn frames(&self) -> usize {
+        self.range.1 - self.range.0 + 1
     }
+
+    /// Current frame position (fractional, absolute frame index).
+    fn position(&self) -> f32 {
+        self.range.0 as f32 + self.time.clamp(0.0, 1.0) * (self.frames() - 1) as f32
+    }
+}
+
+/// Fading from a snapshot of a track to its animation (`StartBlend`).
+#[derive(Debug, Clone)]
+struct Blend {
+    from: Frame,
+    left: f32,
+    total: f32,
 }
 
 /// One reanim instance. Several layers can play different ranges of the same
@@ -183,6 +226,7 @@ pub struct ReanimPlayer {
     pub hidden: Vec<usize>,
     /// Playback speed multiplier.
     pub speed: f32,
+    blends: Vec<Option<Blend>>,
 }
 
 impl ReanimPlayer {
@@ -197,6 +241,7 @@ impl ReanimPlayer {
             image_overrides: HashMap::new(),
             hidden: Vec::new(),
             speed: 1.0,
+            blends: vec![None; tracks],
         }
     }
 
@@ -225,9 +270,28 @@ impl ReanimPlayer {
         let l = &mut self.layers[layer];
         *l = Layer {
             next: l.next.take(),
+            rate: l.rate,
+            started: l.started,
             ..Layer::new(range, looping)
         };
         true
+    }
+
+    /// Like [`Self::play_on`], fading each of the layer's tracks from where it
+    /// is now over `seconds` (the original's `StartBlend`).
+    pub fn blend_on(&mut self, layer: usize, anim: &str, looping: bool, seconds: f32) -> bool {
+        for track in 0..self.track_layer.len() {
+            if self.track_layer[track] != layer {
+                continue;
+            }
+            let from = self.frame(track);
+            self.blends[track] = (from.f >= 0.0).then_some(Blend {
+                from,
+                left: seconds,
+                total: seconds,
+            });
+        }
+        self.play_on(layer, anim, looping)
     }
 
     /// Adds a layer playing `anim` and moves onto it every track that first
@@ -263,31 +327,49 @@ impl ReanimPlayer {
         self.layer_of(track).started
     }
 
-    /// The interpolated frame of a track right now.
+    /// A track's transform: image pixels → game coordinates relative to the
+    /// instance origin.
+    pub fn transform(&self, track: usize) -> Affine2 {
+        affine(&self.frame(track))
+    }
+
+    /// The interpolated frame of a track right now, blended if fading.
     pub fn frame(&self, track: usize) -> Frame {
         let layer = self.layer_of(track);
         let frames = &self.def.frames[track];
-        let (start, end) = layer.range;
-        let pos = layer.position();
-        let i0 = start + pos.floor() as usize;
-        let mut i1 = i0 + 1;
-        if i1 > end {
-            i1 = if layer.looping { start } else { end };
-        }
-        let t = pos.fract();
         let last = frames.len() - 1;
-        let (a, b) = (&frames[i0.min(last)], &frames[i1.min(last)]);
-        let lerp = |x: f32, y: f32| x + (y - x) * t;
-        Frame {
-            x: lerp(a.x, b.x),
-            y: lerp(a.y, b.y),
-            kx: lerp(a.kx, b.kx),
-            ky: lerp(a.ky, b.ky),
-            sx: lerp(a.sx, b.sx),
-            sy: lerp(a.sy, b.sy),
-            a: lerp(a.a, b.a),
+        let pos = layer.position();
+        let i0 = (pos.floor() as usize).min(last);
+        let (i0, i1) = if i0 >= layer.range.1 {
+            (layer.range.1.min(last), layer.range.1.min(last))
+        } else {
+            (i0, (i0 + 1).min(last))
+        };
+        let t = pos - pos.floor();
+        let (a, b) = (&frames[i0], &frames[i1]);
+        let lerp = |x: f32, y: f32, t: f32| x + (y - x) * t;
+        let mut f = Frame {
+            x: lerp(a.x, b.x, t),
+            y: lerp(a.y, b.y, t),
+            kx: lerp(a.kx, b.kx, t),
+            ky: lerp(a.ky, b.ky, t),
+            sx: lerp(a.sx, b.sx, t),
+            sy: lerp(a.sy, b.sy, t),
+            a: lerp(a.a, b.a, t),
             ..a.clone()
+        };
+        if let Some(blend) = self.blends[track].as_ref().filter(|_| f.f >= 0.0) {
+            let w = blend.left / blend.total;
+            let g = &blend.from;
+            f.x = lerp(f.x, g.x, w);
+            f.y = lerp(f.y, g.y, w);
+            f.kx = lerp(f.kx, g.kx, w);
+            f.ky = lerp(f.ky, g.ky, w);
+            f.sx = lerp(f.sx, g.sx, w);
+            f.sy = lerp(f.sy, g.sy, w);
+            f.a = lerp(f.a, g.a, w);
         }
+        f
     }
 
     /// Image id a track shows on this frame, after overrides.
@@ -327,14 +409,27 @@ pub struct TrackLabel;
 /// Corners of an image of `size` placed by `frame`, in game coordinates:
 /// top-left, top-right, bottom-right, bottom-left.
 pub fn quad(frame: &Frame, size: Vec2, origin: Vec2) -> [Vec2; 4] {
-    let (a, b, c, d) = matrix(frame);
-    let map = |u: f32, v: f32| origin + Vec2::new(a * u + c * v + frame.x, b * u + d * v + frame.y);
+    quad_affine(affine(frame), size).map(|c| origin + c)
+}
+
+/// Corners of an image of `size` mapped by `m`.
+pub fn quad_affine(m: Affine2, size: Vec2) -> [Vec2; 4] {
     [
-        map(0.0, 0.0),
-        map(size.x, 0.0),
-        map(size.x, size.y),
-        map(0.0, size.y),
+        Vec2::ZERO,
+        Vec2::new(size.x, 0.0),
+        size,
+        Vec2::new(0.0, size.y),
     ]
+    .map(|p| m.transform_point2(p))
+}
+
+/// A frame as an affine map from image pixels to game coordinates.
+pub fn affine(f: &Frame) -> Affine2 {
+    let (a, b, c, d) = matrix(f);
+    Affine2::from_mat2_translation(
+        Mat2::from_cols(Vec2::new(a, b), Vec2::new(c, d)),
+        Vec2::new(f.x, f.y),
+    )
 }
 
 fn matrix(f: &Frame) -> (f32, f32, f32, f32) {
@@ -437,24 +532,38 @@ fn quad_mesh() -> Mesh {
 
 fn advance_players(clock: Res<Clock>, mut players: Query<&mut ReanimPlayer>) {
     for mut p in &mut players {
-        let fps = p.def.reanim.fps.max(1.0) * p.speed;
-        let def = p.def.clone();
+        let p = &mut *p;
+        let def_fps = p.def.reanim.fps.max(1.0);
+        for blend in p.blends.iter_mut() {
+            if let Some(b) = blend {
+                b.left -= clock.dt;
+                if b.left <= 0.0 {
+                    *blend = None;
+                }
+            }
+        }
         for layer in &mut p.layers {
             if layer.finished || !layer.started {
                 continue;
             }
-            layer.time += clock.dt * fps;
-            let len = (layer.range.1 - layer.range.0 + 1) as f32;
-            if !layer.looping && layer.time >= len - 1.0 {
-                layer.time = len - 1.0;
+            let rate = layer.rate.unwrap_or(def_fps) * p.speed;
+            layer.time += clock.dt * rate / layer.frames() as f32;
+            if layer.looping {
+                while layer.time >= 1.0 {
+                    layer.time -= 1.0;
+                    layer.loops += 1;
+                }
+            } else if layer.time >= 1.0 {
+                layer.time = 1.0;
+                layer.loops = 1;
                 match layer
                     .next
                     .take()
-                    .and_then(|(anim, looping)| Some((def.range(&anim)?, looping)))
+                    .and_then(|(anim, looping)| Some((p.def.range(&anim)?, looping)))
                 {
                     Some((range, looping)) => {
                         *layer = Layer {
-                            started: true,
+                            rate: layer.rate,
                             ..Layer::new(range, looping)
                         }
                     }
@@ -473,6 +582,7 @@ type PlayerView = (
     Option<&'static ReanimScale>,
     Option<&'static ReanimAlpha>,
     &'static Visibility,
+    Option<&'static ReanimAttach>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -488,14 +598,30 @@ fn draw_tracks(
     mut labels: Query<&mut Transform, With<TrackLabel>>,
     mut gizmos: Gizmos,
 ) {
-    for (player, origin, children, scale, alpha, root_vis) in &players {
+    for (player, origin, children, scale, alpha, root_vis, attach) in &players {
         // Hidden instances keep their last pose; box-mode gizmos ignore
         // visibility, so they must be skipped here.
         if *root_vis == Visibility::Hidden {
             continue;
         }
-        let scale = scale.map_or(1.0, |s| s.0);
-        let alpha = alpha.map_or(1.0, |a| a.0);
+        let mut origin = origin.0;
+        let mut scale = scale.map_or(1.0, |s| s.0);
+        let mut alpha = alpha.map_or(1.0, |a| a.0);
+        let mut overlay = Affine2::IDENTITY;
+        if let Some(a) = attach {
+            // Attached instances follow their parent's placement.
+            let Ok((parent, p_origin, _, p_scale, p_alpha, p_vis, _)) = players.get(a.parent)
+            else {
+                continue;
+            };
+            if *p_vis == Visibility::Hidden {
+                continue;
+            }
+            overlay = parent.transform(a.track) * a.base_inv;
+            origin = p_origin.0;
+            scale = p_scale.map_or(1.0, |s| s.0);
+            alpha *= p_alpha.map_or(1.0, |a| a.0);
+        }
         for child in children.iter() {
             let Ok((visual, mut vis, label_children)) = tracks.get_mut(child) else {
                 continue;
@@ -514,8 +640,11 @@ fn draw_tracks(
             };
             *vis = Visibility::Inherited;
 
-            let corners =
-                quad(&frame, cached.size.as_vec2(), Vec2::ZERO).map(|c| origin.0 + c * scale);
+            let corners = quad_affine(
+                overlay * player.transform(visual.track),
+                cached.size.as_vec2(),
+            )
+            .map(|c| origin + c * scale);
             if let Some(mut mesh) = meshes.get_mut(&visual.mesh) {
                 let positions: Vec<[f32; 3]> = corners
                     .iter()

@@ -173,7 +173,9 @@ fn write_images(dir: &Path) -> Result<(), String> {
         .save(&img("projectilepea"))
 }
 
-/// A green blob on a stalk: 25-frame idle, the head bobbing.
+/// A green blob on a stalk, split like the real plant: body frames 0..25
+/// (`anim_idle`, with an `anim_stem` track the head rides on), head idle
+/// 25..50 and a squashing shot 50..75.
 fn write_plant(dir: &Path) -> Result<(), String> {
     let img = |name: &str| dir.join(format!("reanim/plant_{name}.png"));
     Canvas::new(12, 40)
@@ -185,16 +187,45 @@ fn write_plant(dir: &Path) -> Result<(), String> {
     Canvas::new(16, 14)
         .panel([90, 170, 70, 255], [50, 110, 40, 255], 3.0)
         .save(&img("mouth"))?;
-    const N: usize = 25;
-    let bob = |i: usize| 2.0 * phase(i, N).sin();
+    const L: usize = 25;
+    const N: usize = 3 * L;
+    let body = |i: usize| i < L;
+    let head = |i: usize| i >= L;
+    // The stem sways; the head (posed around the stem's first position)
+    // follows it through the attachment.
+    let sway = |i: usize| 3.0 * phase(i % L, L).sin();
+    // Shooting squashes the head towards the mouth.
+    let squash = |i: usize| {
+        if i >= 2 * L {
+            1.0 - 0.25 * (phase(i - 2 * L, 2 * L)).sin().max(0.0)
+        } else {
+            1.0
+        }
+    };
+    let stem = Track {
+        name: "anim_stem".into(),
+        frames: (0..N)
+            .map(|i| RawFrame {
+                x: Some(36.0 + sway(i)),
+                y: Some(44.0),
+                f: Some(if body(i) { 0.0 } else { -1.0 }),
+                ..RawFrame::default()
+            })
+            .collect(),
+    };
     let tracks = vec![
-        marker("anim_full_idle", N, 0..N),
-        part("stalk_bottom", "PLANT_STALK", N, |_| Some(at(30.0, 46.0))),
+        marker("anim_idle", N, 0..L),
+        marker("anim_head_idle", N, L..2 * L),
+        marker("anim_shooting", N, 2 * L..N),
+        part("stalk_bottom", "PLANT_STALK", N, move |i| {
+            body(i).then(|| at(30.0, 46.0).rot(-sway(i)))
+        }),
+        stem,
         part("anim_face", "PLANT_HEAD", N, move |i| {
-            Some(at(14.0 + bob(i), 12.0))
+            head(i).then(|| at(14.0 + 46.0 * (1.0 - squash(i)), 12.0).scale(squash(i)))
         }),
         part("idle_mouth", "PLANT_MOUTH", N, move |i| {
-            Some(at(56.0 + bob(i), 24.0))
+            head(i).then(|| at(56.0, 24.0))
         }),
     ];
     save_reanim(dir, crate::board::PEASHOOTER, 12.0, tracks)

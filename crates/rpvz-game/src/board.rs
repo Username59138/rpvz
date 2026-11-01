@@ -10,15 +10,15 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
-use rpvz_sim::consts::{BOARD_OFFSET, CELL_H, CELL_W, LAWN_X, TICKS_PER_SECOND};
+use rpvz_sim::consts::{BOARD_OFFSET, CELL_W, LAWN_X, TICKS_PER_SECOND};
 use rpvz_sim::{Event, Id, Level, MowerState, Outcome, Sim, ZombieState};
 
 use crate::config::Config;
 use crate::input::{Pointer, Typed};
 use crate::library::Library;
 use crate::reanim::{
-    Clock, ReanimAlpha, ReanimDef, ReanimOrigin, ReanimPlayer, ReanimScale, ReanimSet,
-    spawn_reanim, to_world,
+    Clock, ReanimAlpha, ReanimAttach, ReanimDef, ReanimOrigin, ReanimPlayer, ReanimScale,
+    ReanimSet, spawn_reanim, to_world,
 };
 use crate::state::GameState;
 use crate::text::{PopText, TextAlign};
@@ -67,12 +67,14 @@ const SOD_1ROW: Vec2 = Vec2::new(239.0 - BOARD_OFFSET, 265.0);
 const ZOMBIE_DRAW: Vec2 = Vec2::new(-36.0, -30.0);
 /// Typical basic-zombie speed the walk animation was made for.
 const ZOMBIE_ANIM_SPEED: f32 = 0.27;
-const PEA_DRAW_Y: f32 = 22.0;
 /// The sun reanim is drawn around its centre.
 const SUN_DRAW: Vec2 = Vec2::ZERO;
 const MOWER_DRAW_Y: f32 = 23.0;
-/// Where the cursor holds a picked-up plant, from its top-left (approx.).
-const HELD_GRIP: Vec2 = Vec2::new(CELL_W / 2.0, CELL_H / 2.0);
+/// The picked-up plant is drawn at the cursor minus (25, 35) (the cursor
+/// object) minus (10, 25) (its draw offset).
+const HELD_GRIP: Vec2 = Vec2::new(35.0, 60.0);
+/// The planting preview is drawn at alpha 100/255.
+const PREVIEW_ALPHA: f32 = 100.0 / 255.0;
 /// Plant icon placement and size on a packet.
 const PACKET_ICON: Vec2 = Vec2::new(5.0, 9.0);
 const PACKET_ICON_SCALE: f32 = 0.5;
@@ -117,7 +119,19 @@ const ARM_STUMP: (&str, &str) = (
     "IMAGE_REANIM_ZOMBIE_OUTERARM_UPPER2",
 );
 /// Whole plant (body and head) in one range, used for packets and previews.
-const PLANT_FULL: &str = "anim_full_idle";
+// Plant animations. The original draws a peashooter as two instances of
+// one reanim: the body on `anim_idle` and the head on `anim_head_idle`,
+// attached to the body's `anim_stem` track.
+const BODY_IDLE: &str = "anim_idle";
+const HEAD_IDLE: &str = "anim_head_idle";
+const HEAD_SHOOT: &str = "anim_shooting";
+const STEM: &str = "anim_stem";
+/// Head shooting animation speed, frames per second.
+const HEAD_SHOOT_RATE: f32 = 35.0;
+/// `StartBlend(20)`: 20 ticks.
+const HEAD_BLEND: f32 = 0.2;
+/// The head draws just above the body.
+const HEAD_DZ: f32 = 0.5;
 
 #[derive(Resource)]
 pub struct Board {
@@ -128,6 +142,8 @@ pub struct Board {
     mowers: HashMap<usize, Entity>,
     defs: HashMap<&'static str, Arc<ReanimDef>>,
     ended_at: Option<f32>,
+    /// Events of the ticks run this frame.
+    events: Vec<Event>,
     /// Tick until which the sun counter flashes.
     out_of_money_until: u32,
 }
@@ -215,6 +231,55 @@ fn sprite(
     )
 }
 
+/// Body entity of a plant, pointing at its head.
+#[derive(Component)]
+struct PlantHead(Entity);
+
+/// A plant as the original draws it: the body reanim on [`BODY_IDLE`] and a
+/// second instance for the head on [`HEAD_IDLE`], attached to the body's
+/// stem. `still` holds both on their first frame, like the cached image the
+/// original uses on packets and under the cursor.
+#[allow(clippy::too_many_arguments)]
+fn spawn_plant(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    def: &Arc<ReanimDef>,
+    origin: Vec2,
+    z: f32,
+    labels: bool,
+    still: bool,
+) -> Entity {
+    let mut body = ReanimPlayer::new(def.clone());
+    body.play(BODY_IDLE, true);
+    let mut head = ReanimPlayer::new(def.clone());
+    head.play(HEAD_IDLE, true);
+    if still {
+        body.layers[0].finished = true;
+        head.layers[0].finished = true;
+    }
+    let attach = ReanimAttach::new(Entity::PLACEHOLDER, &body, STEM);
+    let b = spawn_reanim(commands, meshes, materials, body, origin, z, labels);
+    let h = spawn_reanim(commands, meshes, materials, head, origin, HEAD_DZ, labels);
+    commands.entity(h).insert(ChildOf(b));
+    if let Some(attach) = attach {
+        commands.entity(h).insert(ReanimAttach {
+            parent: b,
+            ..attach
+        });
+    }
+    commands.entity(b).insert(PlantHead(h));
+    b
+}
+
+/// The Peashooter's stem positions over its idle loop.
+fn stem_frames(def: &ReanimDef) -> Option<Vec<(f32, f32)>> {
+    let track = def.track_index(STEM)?;
+    let (start, end) = def.range(BODY_IDLE)?;
+    let frames = def.frames[track].get(start..=end)?;
+    Some(frames.iter().map(|f| (f.x, f.y)).collect())
+}
+
 fn packet_pos(i: usize) -> Vec2 {
     Vec2::new(PACKET_X + i as f32 * PACKET_STEP, PACKET_Y)
 }
@@ -234,7 +299,7 @@ fn enter(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64)
     };
-    let sim = Sim::new(Level::one_one(), seed);
+    let mut sim = Sim::new(Level::one_one(), seed);
     info!("level 1-1, seed {seed}");
 
     let mut defs = HashMap::new();
@@ -242,6 +307,10 @@ fn enter(
         if let Some(d) = load_def(&ui.library, name) {
             defs.insert(name, d);
         }
+    }
+
+    if let Some(stem) = defs.get(PEASHOOTER).and_then(|d| stem_frames(d)) {
+        sim.set_stem(stem);
     }
 
     sprite(
@@ -285,17 +354,15 @@ fn enter(
             )),
         );
         if let Some(def) = defs.get(PEASHOOTER) {
-            let mut icon = ReanimPlayer::new(def.clone());
-            icon.play(PLANT_FULL, false);
-            icon.layers[0].finished = true;
-            let e = spawn_reanim(
+            let e = spawn_plant(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
-                icon,
+                def,
                 pos + PACKET_ICON,
                 Z_BANK + 2.0,
                 false,
+                true,
             );
             commands
                 .entity(e)
@@ -345,30 +412,31 @@ fn enter(
         BoardEntity,
     ));
     if let Some(def) = defs.get(PEASHOOTER) {
-        let mut ghost = ReanimPlayer::new(def.clone());
-        ghost.play(PLANT_FULL, true);
-        let e = spawn_reanim(
+        let e = spawn_plant(
             &mut commands,
             &mut meshes,
             &mut materials,
-            ghost,
+            def,
             Vec2::ZERO,
             Z_PREVIEW,
             false,
+            true,
         );
-        commands
-            .entity(e)
-            .insert((Preview, ReanimAlpha(0.5), Visibility::Hidden, BoardEntity));
-        let mut held = ReanimPlayer::new(def.clone());
-        held.play(PLANT_FULL, true);
-        let e = spawn_reanim(
+        commands.entity(e).insert((
+            Preview,
+            ReanimAlpha(PREVIEW_ALPHA),
+            Visibility::Hidden,
+            BoardEntity,
+        ));
+        let e = spawn_plant(
             &mut commands,
             &mut meshes,
             &mut materials,
-            held,
+            def,
             Vec2::ZERO,
             Z_HELD,
             false,
+            true,
         );
         commands
             .entity(e)
@@ -383,6 +451,7 @@ fn enter(
         mowers: HashMap::new(),
         defs,
         ended_at: None,
+        events: Vec::new(),
         out_of_money_until: 0,
     });
 }
@@ -438,24 +507,26 @@ fn input(
     }
 }
 
-fn step(clock: Res<Clock>, mut board: ResMut<Board>, mut log: Local<Vec<Event>>) {
+fn step(clock: Res<Clock>, mut board: ResMut<Board>) {
+    let board = &mut *board;
     let tick = 1.0 / TICKS_PER_SECOND as f32;
     board.acc += clock.dt;
-    log.clear();
+    board.events.clear();
     let mut steps = 0;
     while board.acc >= tick && steps < 20 {
         board.acc -= tick;
         board.sim.step();
-        log.extend(board.sim.events.iter().cloned());
+        board.events.extend(board.sim.events.iter().cloned());
         steps += 1;
     }
-    for e in log.iter() {
+    for e in &board.events {
         match e {
             Event::WaveStarted { wave, last } => {
                 info!("wave {wave}{}", if *last { " (final)" } else { "" })
             }
             Event::GameOver(o) => info!("game over: {o:?}"),
             Event::Planted(_) | Event::SunCollected(_) | Event::MowerStarted(_) => info!("{e:?}"),
+            Event::ShootStarted(_) | Event::Shot { .. } => debug!("{e:?} at {:.2}", clock.elapsed),
             _ => {}
         }
     }
@@ -475,6 +546,7 @@ fn sync_views(
         Option<&mut ZombieView>,
     )>,
     mut transforms: Query<&mut Transform>,
+    plant_heads: Query<&PlantHead>,
 ) {
     let board = &mut *board;
     let sim = &board.sim;
@@ -497,6 +569,60 @@ fn sync_views(
         keep
     });
 
+    let shots: Vec<Id> = board
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ShootStarted(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    for p in &sim.plants {
+        let Some(&body) = board.views.get(&p.id) else {
+            let Some(def) = board.defs.get(PEASHOOTER) else {
+                continue;
+            };
+            let origin = Vec2::new(p.left(), Sim::row_y(p.row));
+            let e = spawn_plant(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                def,
+                origin,
+                Z_PLANT + p.row as f32,
+                labels,
+                false,
+            );
+            commands.entity(e).insert(BoardEntity);
+            board.views.insert(p.id, e);
+            continue;
+        };
+        // The body follows the simulation's idle clock, which the pea's
+        // starting point depends on.
+        let Ok(head) = plant_heads.get(body).map(|h| h.0) else {
+            continue;
+        };
+        let (rate, time) = (p.anim_rate, p.anim_time);
+        if let Ok((mut player, ..)) = players.get_mut(body) {
+            player.layers[0].rate = Some(rate);
+            player.layers[0].time = time;
+        }
+        if let Ok((mut player, ..)) = players.get_mut(head) {
+            let shooting =
+                player.layers[0].range == player.def.range(HEAD_SHOOT).unwrap_or_default();
+            if shots.contains(&p.id) {
+                player.blend_on(0, HEAD_SHOOT, false, HEAD_BLEND);
+                player.layers[0].rate = Some(HEAD_SHOOT_RATE);
+            } else if shooting && player.layers[0].loops > 0 {
+                player.blend_on(0, HEAD_IDLE, true, HEAD_BLEND);
+                player.layers[0].rate = Some(rate);
+                player.layers[0].time = time;
+            } else if !shooting {
+                player.layers[0].rate = Some(rate);
+                player.layers[0].time = time;
+            }
+        }
+    }
     let mut spawn_reanim_view =
         |commands: &mut Commands,
          def: &Arc<ReanimDef>,
@@ -518,19 +644,6 @@ fn sync_views(
             e
         };
 
-    for p in &sim.plants {
-        if board.views.contains_key(&p.id) {
-            continue;
-        }
-        let Some(def) = board.defs.get(PEASHOOTER) else {
-            continue;
-        };
-        let origin = Vec2::new(p.left(), Sim::row_y(p.row));
-        let e = spawn_reanim_view(&mut commands, def, origin, Z_PLANT + p.row as f32, &|pl| {
-            pl.play(PLANT_FULL, true);
-        });
-        board.views.insert(p.id, e);
-    }
     for z in &sim.zombies {
         let origin = Vec2::new(z.x, Sim::row_y(z.row)) + ZOMBIE_DRAW;
         if let Some(&e) = board.views.get(&z.id) {
@@ -556,7 +669,7 @@ fn sync_views(
         board.views.insert(z.id, e);
     }
     for pea in &sim.peas {
-        let pos = Vec2::new(pea.x, Sim::row_y(pea.row) + PEA_DRAW_Y);
+        let pos = Vec2::new(pea.x, pea.y);
         match board.views.get(&pea.id) {
             Some(&e) => {
                 if let Ok(mut t) = transforms.get_mut(e) {
@@ -754,7 +867,10 @@ mod tests {
     fn check(library: &Library) {
         let def = |name: &str| ReanimDef::new(library.load_reanim(name).unwrap());
         let plant = def(PEASHOOTER);
-        assert!(plant.range(PLANT_FULL).is_some());
+        for anim in [BODY_IDLE, HEAD_IDLE, HEAD_SHOOT] {
+            assert!(plant.range(anim).is_some(), "peashooter {anim}");
+        }
+        assert!(plant.track_index(STEM).is_some());
         // The Repeater shares the Peashooter's images but has eyebrows.
         assert!(
             plant.track_index("PeaShooter_eyebrow").is_none(),

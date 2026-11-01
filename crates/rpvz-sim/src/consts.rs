@@ -45,15 +45,34 @@ pub const PLANT_HEALTH: i32 = 300;
 pub const PEASHOOTER_COST: i32 = 100;
 pub const PEASHOOTER_RECHARGE: u32 = 750;
 pub const PEASHOOTER_LAUNCH_RATE: i32 = 150;
-/// Random shortening of each reload (approx.).
-pub const LAUNCH_JITTER: i32 = 15;
-/// Pea spawn point relative to the plant cell's left edge (approx.).
-pub const PEA_SPAWN_DX: f32 = 50.0;
+/// Each reload is `launch rate - Rand(15)` ticks (0..=14 shorter).
+pub const LAUNCH_JITTER: u32 = 15;
+/// A shooter sees zombies whose hit box overlaps `[x + 60, x + 60 + 800)`.
+pub const SHOOTER_RANGE_DX: f32 = 60.0;
+pub const SHOOTER_RANGE: f32 = 800.0;
+/// Ticks from the start of a shot (head animation) until it ends; the pea
+/// leaves when the counter reaches [`SHOOTING_FIRE_AT`].
+pub const PEASHOOTER_SHOOTING_TICKS: u32 = 33;
+pub const SHOOTING_FIRE_AT: u32 = 1;
+/// Peas start at the head: stem position + (24, -33) from the plant's
+/// top-left.
+pub const PEA_ORIGIN_DX: i32 = 24;
+pub const PEA_ORIGIN_DY: i32 = -33;
+/// Body idle animation speed, frames per second, random per plant.
+pub const PLANT_IDLE_RATE_MIN: f32 = 15.0;
+pub const PLANT_IDLE_RATE_MAX: f32 = 20.0;
+/// Stem position used when no animation data was given: the average over
+/// the Peashooter's idle cycle (approx.; the real one sways about 10 px).
+pub const DEFAULT_STEM: (f32, f32) = (40.95, 44.64);
+/// Frames in the Peashooter's idle loop, when no animation data was given.
+pub const DEFAULT_IDLE_FRAMES: usize = 25;
 
 // --- Projectiles (original) ------------------------------------------------
 pub const PEA_DAMAGE: i32 = 20;
 pub const PEA_SPEED: f32 = 3.33;
-pub const PEA_WIDTH: f32 = 28.0;
+/// A pea's hit box is `[x - 15, x + 40)` (40 px wide, 15 px reach back).
+pub const PEA_RECT_DX: i32 = -15;
+pub const PEA_RECT_W: i32 = 55;
 
 // --- Zombies ---------------------------------------------------------------
 /// Basic zombie body health (original).
@@ -64,13 +83,17 @@ pub const ZOMBIE_SPEED_MAX: f32 = 0.32;
 /// Eating: `DAMAGE_PER_EAT` every `TICKS_BETWEEN_EATS` ticks (original).
 pub const TICKS_BETWEEN_EATS: u32 = 4;
 pub const DAMAGE_PER_EAT: i32 = 4;
-/// Hit box width (approx.).
+/// Hit box `(36, 0, 42, 115)` relative to the zombie's position; the sim
+/// keeps the hit box's left edge as the zombie's `x`.
 pub const ZOMBIE_WIDTH: f32 = 42.0;
-/// Zombies appear here (approx.).
-pub const ZOMBIE_SPAWN_X: f32 = 790.0;
+pub const ZOMBIE_RECT_DX: f32 = 36.0;
+/// Zombies appear at position `780 + Rand(40)`.
+pub const ZOMBIE_SPAWN_X: f32 = 780.0 + ZOMBIE_RECT_DX;
 pub const ZOMBIE_SPAWN_X_RANGE: i32 = 40;
-/// Headless zombies lose this much health per tick until they fall (approx.).
+/// Headless zombies lose this much health on one tick in
+/// [`HEADLESS_DECAY_CHANCE`] until they fall.
 pub const HEADLESS_DECAY: i32 = 1;
+pub const HEADLESS_DECAY_CHANCE: u32 = 5;
 
 // --- Lawn mowers -----------------------------------------------------------
 pub const MOWER_X: f32 = -20.0;

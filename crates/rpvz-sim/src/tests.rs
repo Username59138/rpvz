@@ -27,12 +27,19 @@ fn basic_zombie_takes_ten_peas() {
         ZombieState::Walking,
         "headless zombies keep going a moment"
     );
-    // Headless decay finishes it within a second.
-    for _ in 0..100 {
+    // Headless decay (1 health on one tick in five) finishes the remaining
+    // 70 health in about 3.5 seconds.
+    let mut ticks = 0;
+    while !sim
+        .zombies
+        .iter()
+        .any(|x| x.id == z && matches!(x.state, ZombieState::Dead { .. }))
+    {
         sim.step();
+        ticks += 1;
+        assert!(ticks < 1000, "still alive");
     }
-    let zombie = sim.zombies.iter().find(|x| x.id == z).unwrap();
-    assert!(matches!(zombie.state, ZombieState::Dead { .. }));
+    assert!((200..=600).contains(&ticks), "{ticks} ticks");
 }
 
 #[test]
@@ -109,6 +116,7 @@ fn peashooter_fires_every_one_and_a_half_seconds() {
         })
         .collect();
     assert!(shots.len() >= 6, "{shots:?}");
+    // Reloads are 150 - Rand(15) ticks.
     for w in shots.windows(2) {
         let gap = w[1] - w[0];
         assert!((135..=150).contains(&gap), "gap {gap}");
@@ -186,4 +194,58 @@ fn cells() {
     assert_eq!(Sim::cell_at(759.0, 579.0), Some((8, 4)));
     assert_eq!(Sim::cell_at(39.0, 300.0), None);
     assert_eq!(Sim::cell_at(400.0, 580.0), None);
+}
+
+#[test]
+fn pea_leaves_32_ticks_into_the_shot_from_the_head() {
+    let mut sim = one_one();
+    let p = sim.plant(0, 1, 2).unwrap();
+    let z = sim.spawn_zombie(2);
+    sim.zombies.iter_mut().find(|x| x.id == z).unwrap().health = 1_000_000;
+    let mut started = None;
+    for _ in 0..400 {
+        sim.step();
+        for e in &sim.events {
+            match e {
+                Event::ShootStarted(id) if *id == p => started = Some(sim.tick),
+                Event::Shot { plant, pea } if *plant == p => {
+                    let at = started.expect("shot started first");
+                    assert_eq!(sim.tick - at, 32);
+                    let pea = sim.peas.iter().find(|x| x.id == *pea).unwrap();
+                    let left = sim.plants[0].left();
+                    // Stem x 37.6..47.4 in the real animation, + 24.
+                    assert!((left + 61.0..=left + 72.0).contains(&pea.x), "{}", pea.x);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+    panic!("never fired");
+}
+
+#[test]
+fn no_target_no_shot_but_the_reload_still_runs() {
+    let mut sim = one_one();
+    sim.plant(0, 1, 2).unwrap();
+    let before = sim.rng.clone();
+    sim.run(1000);
+    assert!(sim.peas.is_empty());
+    assert!(
+        !sim.events
+            .iter()
+            .any(|e| matches!(e, Event::ShootStarted(_)))
+    );
+    // The reload counter kept rolling (and drawing random numbers).
+    assert_ne!(format!("{before:?}"), format!("{:?}", sim.rng));
+}
+
+#[test]
+fn zombie_spawns_just_off_the_lawn() {
+    let mut sim = one_one();
+    for _ in 0..50 {
+        let z = sim.spawn_zombie(2);
+        let x = sim.zombies.iter().find(|q| q.id == z).unwrap().x;
+        assert!((816.0..856.0).contains(&x), "{x}");
+    }
 }
