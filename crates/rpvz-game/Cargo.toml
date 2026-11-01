@@ -1,0 +1,21 @@
+[package]
+name = "rpvz-game"
+description = "RPvZ: a Plants vs. Zombies engine reimplementation in Bevy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rpvz"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rpvz-assets = { path = "../rpvz-assets" }
+rpvz-formats = { path = "../rpvz-formats" }
+bevy = { version = "0.20", default-features = false, features = ["2d", "ui", "jpeg"] }
+
+[lints]
+workspace = true

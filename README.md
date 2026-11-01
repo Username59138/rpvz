@@ -2,7 +2,7 @@
 
 A reimplementation of the Plants vs. Zombies engine in Rust and [Bevy](https://bevyengine.org).
 
-> **Status:** early development. Only the asset installer exists so far.
+> **Status:** early development: asset installer, format parsers and the main menu.
 
 ## Game assets
 
@@ -56,6 +56,27 @@ cargo run -p rpvz-assets -- verify          # re-hash installed files
 RPVZ_TEST_ASSETS=/path/to/android/obb RPVZ_TEST_PC_ASSETS=~/.local/share/rpvz/assets/pc \
   cargo test --release
 ```
+
+## Running the game
+
+```sh
+cargo run --release -p rpvz-game              # uses the installed assets
+cargo run --release -p rpvz-game -- --help
+```
+
+So far there is the main menu (buttons, hover, the click on Start Adventure).
+
+Development options:
+
+- `--make-devpack DIR` writes a placeholder pack (plain original shapes, no game
+  art); `--devpack DIR` runs on it. Useful for CI and screenshots.
+- `--boxes` draws every animation track as a labelled box instead of its image,
+  to check layout against real data; `--labels` adds track names.
+- `--screenshot FILE --at SECONDS [--cursor X,Y] [--click-at SECONDS]` runs a
+  scripted session with a fixed time step, saves a screenshot and exits.
+
+Linux build dependencies (Debian/Ubuntu): `libwayland-dev libxkbcommon-dev
+libudev-dev libasound2-dev pkg-config`.
 
 ## Building
 
