@@ -1,0 +1,6 @@
+/target
+*.apk
+*.xapk
+*.obb
+*.pak
+/assets

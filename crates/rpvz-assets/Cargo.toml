@@ -1,0 +1,41 @@
+[package]
+name = "rpvz-assets"
+description = "Finds, downloads, verifies and installs Plants vs. Zombies game data for RPvZ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rpvz-assets"
+path = "src/bin/rpvz-assets.rs"
+
+[dependencies]
+cab = "0.6"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rpvz-formats = { path = "../rpvz-formats" }
+anyhow.workspace = true
+clap.workspace = true
+directories.workspace = true
+hex.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
