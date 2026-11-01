@@ -106,6 +106,8 @@ pub enum TextAlign {
     #[default]
     Left,
     Center,
+    /// The origin is the right end of the line.
+    Right,
 }
 
 #[derive(Component, Clone, Debug)]
@@ -162,6 +164,7 @@ fn build_text_meshes(
                 let shift = match text.align {
                     TextAlign::Left => 0.0,
                     TextAlign::Center => -(font.font.text_width(line) as f32) / 2.0,
+                    TextAlign::Right => -(font.font.text_width(line) as f32),
                 };
                 for (c, pen) in font.font.layout(line) {
                     let Some(g) = layer.glyphs.get(&c) else {

@@ -46,6 +46,15 @@ const PACKET_STEP: f32 = 59.0;
 const PACKET_Y: f32 = 8.0;
 const PACKET_W: f32 = 50.0;
 const PACKET_H: f32 = 70.0;
+/// Cel of `IMAGE_SEEDS` for ordinary plants (0 is the Imitater, 1 upgrades).
+const PACKET_CEL: f32 = 2.0;
+/// Right end and top of the cost text on a packet.
+const COST_RIGHT_TOP: Vec2 = Vec2::new(32.0, 54.0);
+const COST_FONT: &str = "FONT_PICO129";
+/// The recharge shade covers `68 * part + 2` pixels from the top.
+const RECHARGE_SHADE_H: f32 = 68.0;
+/// Ticks the sun counter flashes red after trying to spend too much.
+const OUT_OF_MONEY_TICKS: u32 = 70;
 const SUN_TEXT: Vec2 = Vec2::new(34.0, 78.0);
 /// Unusable packets are drawn at half brightness in sRGB, like a 128/255
 /// colour multiply. Blending happens in linear space, where that is
@@ -65,7 +74,7 @@ const MOWER_DRAW_Y: f32 = 23.0;
 /// Where the cursor holds a picked-up plant, from its top-left (approx.).
 const HELD_GRIP: Vec2 = Vec2::new(CELL_W / 2.0, CELL_H / 2.0);
 /// Plant icon placement and size on a packet.
-const PACKET_ICON: Vec2 = Vec2::new(5.0, 13.0);
+const PACKET_ICON: Vec2 = Vec2::new(5.0, 9.0);
 const PACKET_ICON_SCALE: f32 = 0.5;
 
 // Reanim files. The PC data's `PeaShooter` reanim is the Repeater (head
@@ -119,6 +128,8 @@ pub struct Board {
     mowers: HashMap<usize, Entity>,
     defs: HashMap<&'static str, Arc<ReanimDef>>,
     ended_at: Option<f32>,
+    /// Tick until which the sun counter flashes.
+    out_of_money_until: u32,
 }
 
 #[derive(Component)]
@@ -266,7 +277,12 @@ fn enter(
             "IMAGE_SEEDS",
             pos,
             Z_BANK + 1.0,
-            Some(Rect::new(0.0, 0.0, PACKET_W, PACKET_H)),
+            Some(Rect::new(
+                PACKET_CEL * PACKET_W,
+                0.0,
+                (PACKET_CEL + 1.0) * PACKET_W,
+                PACKET_H,
+            )),
         );
         if let Some(def) = defs.get(PEASHOOTER) {
             let mut icon = ReanimPlayer::new(def.clone());
@@ -285,13 +301,18 @@ fn enter(
                 .entity(e)
                 .insert((ReanimScale(PACKET_ICON_SCALE), BoardEntity));
         }
-        let cost = to_world(pos + Vec2::new(32.0, 64.0));
+        let boxes = ui.cfg.boxes;
+        let ascent = ui
+            .fonts
+            .get(COST_FONT, &ui.library, &mut ui.images, !boxes)
+            .map_or(0.0, |f| f.ascent());
+        let cost = to_world(pos + COST_RIGHT_TOP + Vec2::new(0.0, ascent));
         commands.spawn((
             PopText::new(
-                "FONT_PICO129",
+                COST_FONT,
                 seed.kind.cost().to_string(),
                 Color::BLACK,
-                TextAlign::Center,
+                TextAlign::Right,
             ),
             Transform::from_xyz(cost.x, cost.y, Z_BANK + 3.0),
             BoardEntity,
@@ -362,6 +383,7 @@ fn enter(
         mowers: HashMap::new(),
         defs,
         ended_at: None,
+        out_of_money_until: 0,
     });
 }
 
@@ -391,11 +413,15 @@ fn input(
     for i in 0..board.sim.seeds.len() {
         let r = Rect::from_corners(packet_pos(i), packet_pos(i) + Vec2::new(PACKET_W, PACKET_H));
         if r.contains(pos) {
-            let usable = {
+            let (ready, affordable) = {
                 let sim = &board.sim;
                 let s = &sim.seeds[i];
-                sim.tick >= s.ready_at && sim.sun >= s.kind.cost()
+                (sim.tick >= s.ready_at, sim.sun >= s.kind.cost())
             };
+            if ready && !affordable {
+                board.out_of_money_until = board.sim.tick + OUT_OF_MONEY_TICKS;
+            }
+            let usable = ready && affordable;
             board.selected = if board.selected == Some(i) || !usable {
                 None
             } else {
@@ -641,6 +667,16 @@ fn hud(
         if t.text != s {
             t.text = s;
         }
+        // Red for 10 of every 20 ticks while the counter runs down.
+        let left = board.out_of_money_until.saturating_sub(sim.tick);
+        let color = if left > 0 && left % 20 < 10 {
+            Color::srgb(1.0, 0.0, 0.0)
+        } else {
+            Color::BLACK
+        };
+        if t.color != color {
+            t.color = color;
+        }
     }
     for (shade, mut sprite, mut vis) in &mut shades {
         let seed = &sim.seeds[shade.packet];
@@ -648,7 +684,11 @@ fn hud(
         let usable =
             progress >= 1.0 && sim.sun >= seed.kind.cost() && board.selected != Some(shade.packet);
         let height = if shade.recharge {
-            1.0 - progress
+            if progress < 1.0 {
+                ((RECHARGE_SHADE_H * (1.0 - progress)).round() + 2.0) / PACKET_H
+            } else {
+                0.0
+            }
         } else if usable {
             0.0
         } else {
