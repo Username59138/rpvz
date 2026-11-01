@@ -59,7 +59,7 @@ impl Canvas {
         self
     }
 
-    fn ellipse(mut self, fill: Rgba) -> Self {
+    pub(crate) fn ellipse(mut self, fill: Rgba) -> Self {
         let (rx, ry) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
         for y in 0..self.h {
             for x in 0..self.w {
@@ -73,7 +73,7 @@ impl Canvas {
     }
 
     /// Vertical gradient with faint horizontal bands.
-    fn backdrop(mut self, top: Rgba, bottom: Rgba) -> Self {
+    pub(crate) fn backdrop(mut self, top: Rgba, bottom: Rgba) -> Self {
         for y in 0..self.h {
             let t = y as f32 / self.h as f32;
             let band = if (y / 40) % 2 == 0 { 0.0 } else { 6.0 };
@@ -169,6 +169,7 @@ pub fn write(dir: &Path) -> Result<(), String> {
         .panel([170, 130, 85, 255], [90, 60, 35, 255], 8.0)
         .save(&img("woodsign2"))?;
     crate::devpack_ui::write(dir)?;
+    crate::devpack_board::write(dir)?;
 
     let buttons: [(&str, &str, &str, Rgba); 4] = [
         (

@@ -1,8 +1,10 @@
 //! RPvZ: a Plants vs. Zombies engine reimplementation.
 
 mod automation;
+mod board;
 mod config;
 mod devpack;
+mod devpack_board;
 mod devpack_ui;
 mod input;
 mod library;
@@ -74,6 +76,7 @@ fn main() -> std::process::ExitCode {
             ui::UiPlugin,
             state::StatePlugin,
             menu::MenuPlugin,
+            board::BoardPlugin,
             profile::ProfilePlugin,
             automation::AutomationPlugin,
         ))

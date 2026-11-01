@@ -72,8 +72,12 @@ Development options:
   art); `--devpack DIR` runs on it. Useful for CI and screenshots.
 - `--boxes` draws every animation track as a labelled box instead of its image,
   to check layout against real data; `--labels` adds track names.
-- `--screenshot FILE --at SECONDS [--cursor X,Y] [--click-at SECONDS]` runs a
-  scripted session with a fixed time step, saves a screenshot and exits.
+- `--screenshot FILE --at SECONDS` runs a scripted session with a fixed time
+  step, saves a screenshot and exits. Input is scripted with
+  `--click SECONDS X,Y`, `--move SECONDS X,Y` (both repeatable, game
+  coordinates) and `--type-at SECONDS TEXT`. For example, plant a peashooter on
+  the placeholder pack and look at the lawn 30 seconds in:
+  `rpvz --devpack DIR --type-at 2 "Ann{enter}" --click 3 480,130 --click 4 110,40 --click 4.5 160,330 --screenshot lawn.png --at 30`
 
 Linux build dependencies (Debian/Ubuntu): `libwayland-dev libxkbcommon-dev
 libudev-dev libasound2-dev pkg-config`.

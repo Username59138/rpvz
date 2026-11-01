@@ -44,11 +44,16 @@ fn update_pointer(
     mut pointer: ResMut<Pointer>,
 ) {
     if cfg.automation.active() {
-        pointer.pos = cfg.automation.cursor;
-        pointer.just_pressed = cfg
-            .automation
-            .click_at
-            .is_some_and(|t| clock.elapsed >= t && clock.elapsed - clock.dt < t);
+        let auto = &cfg.automation;
+        let now = |t: f32| clock.elapsed >= t && clock.elapsed - clock.dt < t;
+        let last = auto
+            .moves
+            .iter()
+            .filter(|(t, _, _)| clock.elapsed >= *t)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        pointer.pos = last.map(|&(_, p, _)| p).or(auto.cursor);
+        pointer.just_pressed = auto.click_at.is_some_and(now)
+            || auto.moves.iter().any(|&(t, _, click)| click && now(t));
         return;
     }
     pointer.just_pressed = mouse.just_pressed(MouseButton::Left);

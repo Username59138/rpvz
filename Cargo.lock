@@ -4920,6 +4920,7 @@ dependencies = [
  "image",
  "rpvz-assets",
  "rpvz-formats",
+ "rpvz-sim",
  "serde",
  "serde_json",
 ]

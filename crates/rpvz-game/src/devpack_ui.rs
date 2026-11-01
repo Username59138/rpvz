@@ -14,6 +14,8 @@ const PIECES: [[&str; 3]; 3] = [
 
 /// Font ids the engine asks for, all served by the one placeholder font.
 const FONT_IDS: &[&str] = &[
+    "CONTINUUMBOLD14",
+    "PICO129",
     "DWARVENTODCRAFT18",
     "DWARVENTODCRAFT24",
     "BRIANNETOD16",
@@ -87,6 +89,9 @@ fn write_resources(dir: &Path) -> Result<(), String> {
         xml += &format!("<Image id=\"BUTTON_DOWN_{side}\" path=\"button_down_{lower}\" />\n");
     }
     xml += "<Image id=\"EDITBOX\" path=\"editbox\" />\n";
+    for (id, path) in crate::devpack_board::IMAGES {
+        xml += &format!("<Image id=\"{id}\" path=\"{path}\" />\n");
+    }
     xml += "<SetDefaults path=\"data\" idprefix=\"FONT_\" />\n";
     for id in FONT_IDS {
         xml += &format!("<Font id=\"{id}\" path=\"devfont.txt\" />\n");

@@ -32,6 +32,9 @@ pub struct Automation {
     /// Keys typed at a simulated second; `{enter}`, `{esc}` and `{bs}` are
     /// special keys, everything else is text.
     pub keys: Vec<(f32, String)>,
+    /// Cursor moves at a simulated second, with a left click if `true`; the
+    /// cursor stays where the last one put it.
+    pub moves: Vec<(f32, Vec2, bool)>,
 }
 
 impl Automation {
@@ -40,6 +43,7 @@ impl Automation {
             || self.cursor.is_some()
             || self.click_at.is_some()
             || !self.keys.is_empty()
+            || !self.moves.is_empty()
     }
 }
 
@@ -67,16 +71,22 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 let text = value("--type-at")?;
                 cfg.automation.keys.push((at, text));
             }
-            "--cursor" => {
-                let v = value("--cursor")?;
-                let (x, y) = v.split_once(',').ok_or("--cursor takes X,Y")?;
-                cfg.automation.cursor = Some(Vec2::new(parse_f32(x)?, parse_f32(y)?));
+            "--cursor" => cfg.automation.cursor = Some(parse_point(&value("--cursor")?)?),
+            "--click" | "--move" => {
+                let at = parse_f32(&value(&arg)?)?;
+                let pos = parse_point(&value(&arg)?)?;
+                cfg.automation.moves.push((at, pos, arg == "--click"));
             }
             "-h" | "--help" => return Err(HELP.into()),
             other => return Err(format!("unknown option {other}\n\n{HELP}")),
         }
     }
     Ok(Command::Run(cfg))
+}
+
+fn parse_point(s: &str) -> Result<Vec2, String> {
+    let (x, y) = s.split_once(',').ok_or("a point is X,Y")?;
+    Ok(Vec2::new(parse_f32(x)?, parse_f32(y)?))
 }
 
 fn parse_f32(s: &str) -> Result<f32, String> {
@@ -92,5 +102,7 @@ const HELP: &str = "rpvz [options]
   --screenshot FILE    save a screenshot and exit
   --at SECONDS         simulated time of the screenshot (default 0)
   --cursor X,Y         fake cursor position (game coordinates)
-  --click-at SECONDS   simulated left click
+  --click-at SECONDS   simulated left click at --cursor
+  --click SECONDS X,Y  move the cursor and click (repeatable)
+  --move SECONDS X,Y   move the cursor (repeatable)
   --type-at SECONDS T  type T at that time ({enter}, {esc}, {bs} are keys)";

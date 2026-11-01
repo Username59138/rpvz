@@ -80,7 +80,10 @@ impl ReanimDef {
         let mut ranges = HashMap::new();
         let mut visual = Vec::new();
         for (i, track) in reanim.tracks.iter().enumerate() {
-            if track.name.starts_with("anim_") {
+            // Marker tracks (`anim_*` without images) name animation ranges;
+            // some `anim_*` tracks do draw (a zombie's head, hair or hat).
+            let draws = track.frames.iter().any(|f| f.image.is_some());
+            if track.name.starts_with("anim_") && !draws {
                 // An animation is the run of frames where its marker track is shown.
                 let shown: Vec<usize> = frames[i]
                     .iter()
@@ -91,7 +94,7 @@ impl ReanimDef {
                 if let (Some(&a), Some(&b)) = (shown.first(), shown.last()) {
                     ranges.insert(track.name.clone(), (a, b));
                 }
-            } else if track.frames.iter().any(|f| f.image.is_some()) {
+            } else if draws {
                 visual.push(i);
             }
         }
@@ -178,6 +181,8 @@ pub struct ReanimPlayer {
     pub image_overrides: HashMap<usize, String>,
     /// Tracks hidden regardless of their frames.
     pub hidden: Vec<usize>,
+    /// Playback speed multiplier.
+    pub speed: f32,
 }
 
 impl ReanimPlayer {
@@ -191,6 +196,19 @@ impl ReanimPlayer {
             track_layer: vec![0; tracks],
             image_overrides: HashMap::new(),
             hidden: Vec::new(),
+            speed: 1.0,
+        }
+    }
+
+    /// Hides every track whose name contains one of `parts` (case-insensitive).
+    pub fn hide_matching(&mut self, parts: &[&str]) {
+        for (i, t) in self.def.reanim.tracks.iter().enumerate() {
+            let name = t.name.to_ascii_lowercase();
+            if parts.iter().any(|p| name.contains(&p.to_ascii_lowercase()))
+                && !self.hidden.contains(&i)
+            {
+                self.hidden.push(i);
+            }
         }
     }
 
@@ -224,9 +242,7 @@ impl ReanimPlayer {
         });
         for (track, first) in self.def.first_shown.iter().enumerate() {
             let Some(first) = *first else { continue };
-            if self.def.reanim.tracks[track].name.starts_with("anim_")
-                || !(range.0..=range.1).contains(&first)
-            {
+            if !self.def.visual.contains(&track) || !(range.0..=range.1).contains(&first) {
                 continue;
             }
             let current = &self.layers[self.track_layer[track]];
@@ -289,6 +305,14 @@ impl ReanimPlayer {
 /// Where a reanim instance sits, in game coordinates.
 #[derive(Component, Default, Clone, Copy)]
 pub struct ReanimOrigin(pub Vec2);
+
+/// Optional size multiplier around the origin (e.g. plant icons on packets).
+#[derive(Component, Clone, Copy)]
+pub struct ReanimScale(pub f32);
+
+/// Optional opacity multiplier (e.g. the planting preview).
+#[derive(Component, Clone, Copy)]
+pub struct ReanimAlpha(pub f32);
 
 #[derive(Component)]
 pub struct TrackVisual {
@@ -413,7 +437,7 @@ fn quad_mesh() -> Mesh {
 
 fn advance_players(clock: Res<Clock>, mut players: Query<&mut ReanimPlayer>) {
     for mut p in &mut players {
-        let fps = p.def.reanim.fps.max(1.0);
+        let fps = p.def.reanim.fps.max(1.0) * p.speed;
         let def = p.def.clone();
         for layer in &mut p.layers {
             if layer.finished || !layer.started {
@@ -441,6 +465,16 @@ fn advance_players(clock: Res<Clock>, mut players: Query<&mut ReanimPlayer>) {
     }
 }
 
+/// What drawing needs from a reanim instance.
+type PlayerView = (
+    &'static ReanimPlayer,
+    &'static ReanimOrigin,
+    &'static Children,
+    Option<&'static ReanimScale>,
+    Option<&'static ReanimAlpha>,
+    &'static Visibility,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn draw_tracks(
     cfg: Res<Config>,
@@ -449,12 +483,19 @@ fn draw_tracks(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    players: Query<(&ReanimPlayer, &ReanimOrigin, &Children)>,
+    players: Query<PlayerView, Without<TrackVisual>>,
     mut tracks: Query<(&TrackVisual, &mut Visibility, Option<&Children>)>,
     mut labels: Query<&mut Transform, With<TrackLabel>>,
     mut gizmos: Gizmos,
 ) {
-    for (player, origin, children) in &players {
+    for (player, origin, children, scale, alpha, root_vis) in &players {
+        // Hidden instances keep their last pose; box-mode gizmos ignore
+        // visibility, so they must be skipped here.
+        if *root_vis == Visibility::Hidden {
+            continue;
+        }
+        let scale = scale.map_or(1.0, |s| s.0);
+        let alpha = alpha.map_or(1.0, |a| a.0);
         for child in children.iter() {
             let Ok((visual, mut vis, label_children)) = tracks.get_mut(child) else {
                 continue;
@@ -473,7 +514,8 @@ fn draw_tracks(
             };
             *vis = Visibility::Inherited;
 
-            let corners = quad(&frame, cached.size.as_vec2(), origin.0);
+            let corners =
+                quad(&frame, cached.size.as_vec2(), Vec2::ZERO).map(|c| origin.0 + c * scale);
             if let Some(mut mesh) = meshes.get_mut(&visual.mesh) {
                 let positions: Vec<[f32; 3]> = corners
                     .iter()
@@ -491,7 +533,7 @@ fn draw_tracks(
                         track_color(visual.track).with_alpha(0.25 * frame.a.clamp(0.0, 1.0));
                 } else {
                     mat.texture = cached.handle.clone();
-                    mat.color = Color::WHITE.with_alpha(frame.a.clamp(0.0, 1.0));
+                    mat.color = Color::WHITE.with_alpha(frame.a.clamp(0.0, 1.0) * alpha);
                 }
             }
             if cfg.boxes {
