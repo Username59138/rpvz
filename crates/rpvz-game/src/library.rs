@@ -185,7 +185,61 @@ pub fn decode_image(path: &Path) -> Result<image::RgbaImage, String> {
             }
         }
     }
+    bleed_alpha(&mut rgba, 4);
     Ok(rgba)
+}
+
+/// Gives fully transparent pixels the average colour of their visible
+/// neighbours, spreading `passes` pixels outwards. Alpha is untouched.
+///
+/// The original art often stores white or black in transparent pixels;
+/// bilinear filtering then blends that colour into the edges, which shows as
+/// a light or dark outline when an image is scaled or placed off-grid.
+pub fn bleed_alpha(img: &mut image::RgbaImage, passes: u32) {
+    let (w, h) = img.dimensions();
+    let mut known: Vec<bool> = img.pixels().map(|p| p.0[3] > 0).collect();
+    for _ in 0..passes {
+        let mut updates = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if known[(y * w + x) as usize] {
+                    continue;
+                }
+                let (mut sum, mut n) = ([0u32; 3], 0u32);
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                        if (dx, dy) == (0, 0)
+                            || nx < 0
+                            || ny < 0
+                            || nx >= w as i32
+                            || ny >= h as i32
+                        {
+                            continue;
+                        }
+                        if known[(ny as u32 * w + nx as u32) as usize] {
+                            let p = img.get_pixel(nx as u32, ny as u32).0;
+                            for c in 0..3 {
+                                sum[c] += u32::from(p[c]);
+                            }
+                            n += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    updates.push((x, y, sum.map(|s| (s / n) as u8)));
+                }
+            }
+        }
+        if updates.is_empty() {
+            break;
+        }
+        for (x, y, rgb) in updates {
+            let p = img.get_pixel_mut(x, y);
+            p.0[..3].copy_from_slice(&rgb);
+            known[(y * w + x) as usize] = true;
+        }
+    }
 }
 
 /// Image size without decoding pixels.
@@ -267,6 +321,69 @@ impl ImageCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bleed_replaces_hidden_white_at_edges() {
+        // 5x5: brown opaque centre, fully transparent white around it.
+        let mut img = image::RgbaImage::from_pixel(5, 5, image::Rgba([255, 255, 255, 0]));
+        img.put_pixel(2, 2, image::Rgba([100, 80, 60, 255]));
+        bleed_alpha(&mut img, 4);
+        for (x, y, p) in img.enumerate_pixels() {
+            assert_eq!(&p.0[..3], &[100, 80, 60], "pixel {x},{y}");
+            assert_eq!(
+                p.0[3],
+                if (x, y) == (2, 2) { 255 } else { 0 },
+                "alpha kept at {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn bleed_leaves_opaque_and_empty_images_alone() {
+        let mut empty = image::RgbaImage::from_pixel(3, 3, image::Rgba([9, 9, 9, 0]));
+        bleed_alpha(&mut empty, 4);
+        assert!(empty.pixels().all(|p| p.0 == [9, 9, 9, 0]));
+        let mut solid = image::RgbaImage::from_pixel(3, 3, image::Rgba([1, 2, 3, 200]));
+        bleed_alpha(&mut solid, 4);
+        assert!(solid.pixels().all(|p| p.0 == [1, 2, 3, 200]));
+    }
+
+    /// With real PC data: no transparent edge pixel of the name sign keeps the
+    /// near-white colour that caused the outline.
+    #[test]
+    fn real_woodsign_edges_take_wood_colour() {
+        let Some(dir) = std::env::var_os("RPVZ_TEST_PC_ASSETS").map(PathBuf::from) else {
+            return;
+        };
+        let img = decode_image(&dir.join("reanim/selectorscreen_woodsign1.png")).unwrap();
+        let (w, h) = img.dimensions();
+        let opaque = |x: i64, y: i64| {
+            x >= 0
+                && y >= 0
+                && x < i64::from(w)
+                && y < i64::from(h)
+                && img.get_pixel(x as u32, y as u32).0[3] > 0
+        };
+        let mut edge = 0;
+        for (x, y, p) in img.enumerate_pixels() {
+            let (x, y) = (i64::from(x), i64::from(y));
+            if p.0[3] == 0
+                && (opaque(x - 1, y) || opaque(x + 1, y) || opaque(x, y - 1) || opaque(x, y + 1))
+            {
+                edge += 1;
+                let brightness = p.0[..3].iter().map(|&c| u32::from(c)).sum::<u32>() / 3;
+                assert!(
+                    brightness < 180,
+                    "edge pixel {x},{y} still light: {:?}",
+                    p.0
+                );
+            }
+        }
+        assert!(
+            edge > 100,
+            "expected an outline of transparent edge pixels, found {edge}"
+        );
+    }
 
     #[test]
     fn resources_xml_ids() {
