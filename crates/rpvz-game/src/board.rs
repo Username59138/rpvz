@@ -10,12 +10,14 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
+use rpvz_formats::ParticleDef;
 use rpvz_sim::consts::{BOARD_OFFSET, CELL_W, LAWN_X, TICKS_PER_SECOND};
 use rpvz_sim::{Event, Id, Level, MowerState, Outcome, Sim, ZombieState};
 
 use crate::config::Config;
 use crate::input::{Pointer, Typed};
 use crate::library::Library;
+use crate::particles::spawn_particles;
 use crate::reanim::{
     Clock, ReanimAlpha, ReanimAttach, ReanimDef, ReanimOrigin, ReanimPlayer, ReanimScale,
     ReanimSet, spawn_reanim, to_world,
@@ -62,9 +64,14 @@ const SUN_TEXT: Vec2 = Vec2::new(34.0, 78.0);
 const SHADE: Color = Color::srgba(0.0, 0.0, 0.0, 0.78);
 const SOD_1ROW: Vec2 = Vec2::new(239.0 - BOARD_OFFSET, 265.0);
 
-// Placement of animations relative to game objects (approx.).
-/// Zombie reanim origin relative to its hit box left edge and row top.
-const ZOMBIE_DRAW: Vec2 = Vec2::new(-36.0, -30.0);
+// Placement of animations relative to game objects.
+/// The zombie reanim sits at its position + (15, -8); the sim's `x` is the
+/// hit box's left edge, 36 px right of the position.
+const ZOMBIE_DRAW: Vec2 = Vec2::new(15.0 - 36.0, -8.0);
+/// Effects when a zombie loses its arm or head: particle effect, and the
+/// track whose position it starts from.
+const ARM_DROP: (&str, &str) = ("ZombieArm", "Zombie_outerarm_lower");
+const HEAD_DROP: (&str, &str) = ("ZombieHead", "anim_head1");
 /// Typical basic-zombie speed the walk animation was made for.
 const ZOMBIE_ANIM_SPEED: f32 = 0.27;
 /// Sun animation speed, frames per second.
@@ -94,6 +101,8 @@ const Z_PLANT: f32 = 10.0;
 const Z_PREVIEW: f32 = 15.5;
 const Z_ZOMBIE: f32 = 20.0;
 const Z_PEA: f32 = 40.0;
+/// Effects from a zombie draw just above it (render order + 1).
+const Z_ZOMBIE_EFFECT: f32 = 0.95;
 /// Suns fly over the seed bank and its counter, like the original's coins.
 const Z_SUN: f32 = 92.0;
 const Z_BANK: f32 = 80.0;
@@ -142,6 +151,7 @@ pub struct Board {
     views: HashMap<Id, Entity>,
     mowers: HashMap<usize, Entity>,
     defs: HashMap<&'static str, Arc<ReanimDef>>,
+    effects: HashMap<&'static str, Arc<ParticleDef>>,
     ended_at: Option<f32>,
     /// Events of the ticks run this frame.
     events: Vec<Event>,
@@ -303,6 +313,15 @@ fn enter(
     let mut sim = Sim::new(Level::one_one(), seed);
     info!("level 1-1, seed {seed}");
 
+    let mut effects = HashMap::new();
+    for name in [ARM_DROP.0, HEAD_DROP.0] {
+        match ui.library.load_particles(name) {
+            Ok(d) => {
+                effects.insert(name, d);
+            }
+            Err(e) => warn!("{e}"),
+        }
+    }
     let mut defs = HashMap::new();
     for name in [PEASHOOTER, ZOMBIE, SUN, MOWER] {
         if let Some(d) = load_def(&ui.library, name) {
@@ -451,6 +470,7 @@ fn enter(
         views: HashMap::new(),
         mowers: HashMap::new(),
         defs,
+        effects,
         ended_at: None,
         events: Vec::new(),
         out_of_money_until: 0,
@@ -527,7 +547,12 @@ fn step(clock: Res<Clock>, mut board: ResMut<Board>) {
             }
             Event::GameOver(o) => info!("game over: {o:?}"),
             Event::Planted(_) | Event::SunCollected(_) | Event::MowerStarted(_) => info!("{e:?}"),
-            Event::ShootStarted(_) | Event::Shot { .. } => debug!("{e:?} at {:.2}", clock.elapsed),
+            Event::ShootStarted(_)
+            | Event::Shot { .. }
+            | Event::ArmLost(_)
+            | Event::HeadLost(_) => {
+                debug!("{e:?} at {:.2}", clock.elapsed)
+            }
             _ => {}
         }
     }
@@ -652,7 +677,20 @@ fn sync_views(
             if let Ok((mut player, mut o, view)) = players.get_mut(e) {
                 o.0 = origin;
                 if let Some(mut view) = view {
-                    update_zombie(&mut player, &mut view, z);
+                    for (effect, at) in update_zombie(&mut player, &mut view, z) {
+                        debug!("effect {effect} at {}", origin + at);
+                        if let Some(def) = board.effects.get(effect) {
+                            let seed = u64::from(sim.tick) << 32 | u64::from(z.id);
+                            let fx = spawn_particles(
+                                &mut commands,
+                                def.clone(),
+                                origin + at,
+                                Z_ZOMBIE + z.row as f32 + Z_ZOMBIE_EFFECT,
+                                seed,
+                            );
+                            commands.entity(fx).insert(BoardEntity);
+                        }
+                    }
                 }
             }
             continue;
@@ -751,7 +789,21 @@ fn sync_views(
 }
 
 /// Picks the zombie's animation and hides lost body parts.
-fn update_zombie(player: &mut ReanimPlayer, view: &mut ZombieView, z: &rpvz_sim::Zombie) {
+/// Picks the zombie's animation and hides lost body parts. Returns the
+/// effects to start for parts that just fell off, with the position (relative
+/// to the reanim origin) of the part.
+fn update_zombie(
+    player: &mut ReanimPlayer,
+    view: &mut ZombieView,
+    z: &rpvz_sim::Zombie,
+) -> Vec<(&'static str, Vec2)> {
+    let mut drops = Vec::new();
+    let track_pos = |player: &ReanimPlayer, name: &str| {
+        player.def.track_index(name).map(|t| {
+            let f = player.frame(t);
+            Vec2::new(f.x, f.y)
+        })
+    };
     let want: &'static str = match z.state {
         ZombieState::Walking => "anim_walk",
         ZombieState::Eating { .. } => "anim_eat",
@@ -766,6 +818,9 @@ fn update_zombie(player: &mut ReanimPlayer, view: &mut ZombieView, z: &rpvz_sim:
         _ => 1.0,
     };
     if view.arm && !z.has_arm {
+        if let Some(p) = track_pos(player, ARM_DROP.1) {
+            drops.push((ARM_DROP.0, p));
+        }
         player.hide_matching(ARM_TRACKS);
         if let Some(t) = player.def.track_index(ARM_STUMP.0) {
             player.image_overrides.insert(t, ARM_STUMP.1.to_owned());
@@ -773,9 +828,13 @@ fn update_zombie(player: &mut ReanimPlayer, view: &mut ZombieView, z: &rpvz_sim:
         view.arm = false;
     }
     if view.head && !z.has_head {
+        if let Some(p) = track_pos(player, HEAD_DROP.1) {
+            drops.push((HEAD_DROP.0, p));
+        }
         player.hide_matching(HEAD_TRACKS);
         view.head = false;
     }
+    drops
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -331,3 +331,34 @@ fn pc_fonts_parse_and_fit_their_images() {
     }
     assert_eq!(count, 20);
 }
+
+/// Every compiled particle effect of the PC data parses, and the ones the
+/// lawn uses have the expected shape.
+#[test]
+fn pc_particles_parse() {
+    let Some(dir) = std::env::var_os("RPVZ_TEST_PC_ASSETS").map(PathBuf::from) else {
+        eprintln!("RPVZ_TEST_PC_ASSETS not set; skipping");
+        return;
+    };
+    let mut count = 0;
+    for e in std::fs::read_dir(dir.join("compiled/particles")).unwrap() {
+        let path = e.unwrap().path();
+        if !path.to_string_lossy().ends_with(".xml.compiled") {
+            continue; // trails use another layout
+        }
+        let def = rpvz_formats::ParticleDef::parse_compiled(&std::fs::read(&path).unwrap())
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        assert!(!def.emitters.is_empty(), "{}", path.display());
+        count += 1;
+    }
+    assert!(count > 100, "{count} particle files");
+    let head = rpvz_formats::ParticleDef::parse_compiled(
+        &std::fs::read(dir.join("compiled/particles/zombiehead.xml.compiled")).unwrap(),
+    )
+    .unwrap();
+    let e = &head.emitters[0];
+    assert_eq!(e.image.as_deref(), Some("IMAGE_ZOMBIEHEAD"));
+    // Gravity and a ground to bounce on.
+    let kinds: Vec<u32> = e.particle_fields.iter().map(|f| f.kind).collect();
+    assert!(kinds.contains(&2) && kinds.contains(&8), "{kinds:?}");
+}

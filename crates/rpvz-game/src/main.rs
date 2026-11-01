@@ -9,6 +9,7 @@ mod devpack_ui;
 mod input;
 mod library;
 mod menu;
+mod particles;
 mod profile;
 mod reanim;
 mod state;
@@ -77,6 +78,7 @@ fn main() -> std::process::ExitCode {
             state::StatePlugin,
             menu::MenuPlugin,
             board::BoardPlugin,
+            particles::ParticlesPlugin,
             profile::ProfilePlugin,
             automation::AutomationPlugin,
         ))

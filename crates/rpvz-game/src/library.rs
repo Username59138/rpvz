@@ -9,6 +9,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use rpvz_formats::ParticleDef;
 use rpvz_formats::Reanim;
 
 /// One directory laid out like the PC data (`reanim/`, `images/`,
@@ -21,6 +22,8 @@ struct Layer {
     ids: HashMap<String, String>,
     /// Font ids (`FONT_...`) mapped to descriptor paths relative to `dir`.
     fonts: HashMap<String, String>,
+    /// Images split into cels: id → (columns, rows).
+    grids: HashMap<String, (u32, u32)>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -35,10 +38,11 @@ impl Library {
         let mut layers = Vec::new();
         let pc = assets.join("pc");
         if pc.is_dir() {
-            let (ids, fonts) = read_resources_xml(&pc);
+            let (ids, fonts, grids) = read_resources_xml(&pc);
             layers.push(Layer {
                 ids,
                 fonts,
+                grids,
                 dir: pc,
             });
         }
@@ -47,6 +51,7 @@ impl Library {
             layers.push(Layer {
                 ids: read_goty_index(&goty),
                 fonts: HashMap::new(),
+                grids: HashMap::new(),
                 dir: goty,
             });
         }
@@ -61,14 +66,23 @@ impl Library {
 
     /// A single PC-style directory, e.g. a placeholder pack.
     pub fn from_dir(dir: &Path) -> Self {
-        let (ids, fonts) = read_resources_xml(dir);
+        let (ids, fonts, grids) = read_resources_xml(dir);
         Self {
             layers: vec![Layer {
                 ids,
                 fonts,
+                grids,
                 dir: dir.to_owned(),
             }],
         }
+    }
+
+    /// Columns and rows of cels an image is split into (1×1 by default).
+    pub fn image_grid(&self, id: &str) -> (u32, u32) {
+        self.layers
+            .iter()
+            .find_map(|l| l.grids.get(id).copied())
+            .unwrap_or((1, 1))
     }
 
     /// File for an image id, trying each layer in order.
@@ -81,6 +95,12 @@ impl Library {
             if let Some(name) = id.strip_prefix("IMAGE_REANIM_") {
                 let name = name.to_ascii_lowercase();
                 stems.push(format!("reanim/{name}"));
+                stems.push(format!("images/{name}"));
+            } else if let Some(name) = id.strip_prefix("IMAGE_") {
+                // Ids the game builds in (not in resources.xml), such as
+                // particle images.
+                let name = name.to_ascii_lowercase();
+                stems.push(format!("particles/{name}"));
                 stems.push(format!("images/{name}"));
             }
             for stem in stems {
@@ -135,15 +155,40 @@ impl Library {
             .map(Arc::new)
             .map_err(|e| format!("{}: {e}", path.display()))
     }
+
+    /// A compiled particle effect by name (`ZombieHead` →
+    /// `compiled/particles/zombiehead.xml.compiled`).
+    pub fn load_particles(&self, name: &str) -> Result<Arc<ParticleDef>, String> {
+        let file = format!(
+            "compiled/particles/{}.xml.compiled",
+            name.to_ascii_lowercase()
+        );
+        let path = self
+            .layers
+            .iter()
+            .map(|l| l.dir.join(&file))
+            .find(|p| p.is_file())
+            .ok_or_else(|| format!("particles {name} not found"))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        ParticleDef::parse_compiled(&bytes)
+            .map(Arc::new)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
 }
+
+type ResourceMaps = (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, (u32, u32)>,
+);
 
 /// `resources.xml`: `<SetDefaults path=".." idprefix=".."/>` then
 /// `<Image id=".." path=".."/>` and `<Font .../>` entries. Returns image and
-/// font maps, both with lower-case paths.
-fn read_resources_xml(dir: &Path) -> (HashMap<String, String>, HashMap<String, String>) {
-    let (mut images, mut fonts) = (HashMap::new(), HashMap::new());
+/// font maps, both with lower-case paths, and the cel grids of images.
+fn read_resources_xml(dir: &Path) -> ResourceMaps {
+    let (mut images, mut fonts, mut grids) = (HashMap::new(), HashMap::new(), HashMap::new());
     let Ok(bytes) = std::fs::read(dir.join("properties/resources.xml")) else {
-        return (images, fonts);
+        return (images, fonts, grids);
     };
     let text = String::from_utf8_lossy(&bytes);
     let attr = |tag: &str, name: &str| -> Option<String> {
@@ -170,11 +215,20 @@ fn read_resources_xml(dir: &Path) -> (HashMap<String, String>, HashMap<String, S
             } else {
                 format!("{}/{path}", base.to_ascii_lowercase())
             };
-            let map = if is_image { &mut images } else { &mut fonts };
-            map.insert(format!("{prefix}{id}"), full);
+            let key = format!("{prefix}{id}");
+            if is_image {
+                let num = |name: &str| attr(tag, name).and_then(|v| v.parse::<u32>().ok());
+                let (cols, rows) = (num("cols").unwrap_or(1), num("rows").unwrap_or(1));
+                if cols > 1 || rows > 1 {
+                    grids.insert(key.clone(), (cols.max(1), rows.max(1)));
+                }
+                images.insert(key, full);
+            } else {
+                fonts.insert(key, full);
+            }
         }
     }
-    (images, fonts)
+    (images, fonts, grids)
 }
 
 fn read_goty_index(dir: &Path) -> HashMap<String, String> {

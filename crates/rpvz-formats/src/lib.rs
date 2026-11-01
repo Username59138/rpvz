@@ -12,6 +12,7 @@
 pub mod error;
 pub mod font;
 pub mod image_ids;
+pub mod particle;
 pub mod ptx;
 mod read;
 pub mod reanim;
@@ -21,6 +22,7 @@ mod trie;
 pub use error::{FormatError, Result};
 pub use font::ImageFont;
 pub use image_ids::ImageIdTable;
+pub use particle::ParticleDef;
 pub use ptx::{PixelFormat, RgbaImage};
 pub use reanim::{Frame, ImageRef, Reanim, Track, Variant};
 pub use rsb::{Group, Packet, PtxInfo, Resource, Rsb};
