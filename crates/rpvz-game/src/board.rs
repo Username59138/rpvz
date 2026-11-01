@@ -68,6 +68,13 @@ const HELD_GRIP: Vec2 = Vec2::new(CELL_W / 2.0, CELL_H / 2.0);
 const PACKET_ICON: Vec2 = Vec2::new(5.0, 13.0);
 const PACKET_ICON_SCALE: f32 = 0.5;
 
+// Reanim files. The PC data's `PeaShooter` reanim is the Repeater (head
+// leaves, eyebrows); the plain Peashooter is `PeaShooterSingle`.
+pub const PEASHOOTER: &str = "peashootersingle";
+const ZOMBIE: &str = "zombie";
+const SUN: &str = "sun";
+const MOWER: &str = "lawnmower";
+
 // Draw order (world z).
 const Z_BACKGROUND: f32 = 0.0;
 const Z_SOD: f32 = 1.0;
@@ -220,7 +227,7 @@ fn enter(
     info!("level 1-1, seed {seed}");
 
     let mut defs = HashMap::new();
-    for name in ["peashooter", "zombie", "sun", "lawnmower"] {
+    for name in [PEASHOOTER, ZOMBIE, SUN, MOWER] {
         if let Some(d) = load_def(&ui.library, name) {
             defs.insert(name, d);
         }
@@ -261,7 +268,7 @@ fn enter(
             Z_BANK + 1.0,
             Some(Rect::new(0.0, 0.0, PACKET_W, PACKET_H)),
         );
-        if let Some(def) = defs.get("peashooter") {
+        if let Some(def) = defs.get(PEASHOOTER) {
             let mut icon = ReanimPlayer::new(def.clone());
             icon.play(PLANT_FULL, false);
             icon.layers[0].finished = true;
@@ -316,7 +323,7 @@ fn enter(
         Transform::from_xyz(sun.x, sun.y, Z_TEXT),
         BoardEntity,
     ));
-    if let Some(def) = defs.get("peashooter") {
+    if let Some(def) = defs.get(PEASHOOTER) {
         let mut ghost = ReanimPlayer::new(def.clone());
         ghost.play(PLANT_FULL, true);
         let e = spawn_reanim(
@@ -489,7 +496,7 @@ fn sync_views(
         if board.views.contains_key(&p.id) {
             continue;
         }
-        let Some(def) = board.defs.get("peashooter") else {
+        let Some(def) = board.defs.get(PEASHOOTER) else {
             continue;
         };
         let origin = Vec2::new(p.left(), Sim::row_y(p.row));
@@ -509,7 +516,7 @@ fn sync_views(
             }
             continue;
         }
-        let Some(def) = board.defs.get("zombie") else {
+        let Some(def) = board.defs.get(ZOMBIE) else {
             continue;
         };
         let e = spawn_reanim_view(&mut commands, def, origin, Z_ZOMBIE + z.row as f32, &|pl| {
@@ -555,7 +562,7 @@ fn sync_views(
                 }
             }
             None => {
-                let Some(def) = board.defs.get("sun") else {
+                let Some(def) = board.defs.get(SUN) else {
                     continue;
                 };
                 let e = spawn_reanim_view(&mut commands, def, origin, Z_SUN, &|_| {});
@@ -578,7 +585,7 @@ fn sync_views(
                 }
             }
             None if m.state != MowerState::Gone => {
-                let Some(def) = board.defs.get("lawnmower") else {
+                let Some(def) = board.defs.get(MOWER) else {
                     continue;
                 };
                 let e = spawn_reanim_view(&mut commands, def, origin, Z_MOWER, &|pl| {
@@ -706,9 +713,14 @@ mod tests {
     /// Animations and tracks the board looks up by name.
     fn check(library: &Library) {
         let def = |name: &str| ReanimDef::new(library.load_reanim(name).unwrap());
-        let plant = def("peashooter");
+        let plant = def(PEASHOOTER);
         assert!(plant.range(PLANT_FULL).is_some());
-        let zombie = def("zombie");
+        // The Repeater shares the Peashooter's images but has eyebrows.
+        assert!(
+            plant.track_index("PeaShooter_eyebrow").is_none(),
+            "Repeater reanim"
+        );
+        let zombie = def(ZOMBIE);
         for anim in ["anim_walk", "anim_eat", "anim_death"] {
             assert!(zombie.range(anim).is_some(), "zombie {anim}");
         }
@@ -724,8 +736,8 @@ mod tests {
                 assert!(found, "zombie track {part}");
             }
         }
-        assert!(def("lawnmower").range("anim_normal").is_some());
-        assert!(def("sun").track_index("Sun1").is_some());
+        assert!(def(MOWER).range("anim_normal").is_some());
+        assert!(def(SUN).track_index("Sun1").is_some());
         for id in [
             "IMAGE_BACKGROUND1UNSODDED",
             "IMAGE_SOD1ROW",

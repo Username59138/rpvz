@@ -197,7 +197,7 @@ fn write_plant(dir: &Path) -> Result<(), String> {
             Some(at(56.0 + bob(i), 24.0))
         }),
     ];
-    save_reanim(dir, "peashooter", 12.0, tracks)
+    save_reanim(dir, crate::board::PEASHOOTER, 12.0, tracks)
 }
 
 /// A boxy walker made of rectangles: walk 0..24, eat 24..40, death 40..64.
