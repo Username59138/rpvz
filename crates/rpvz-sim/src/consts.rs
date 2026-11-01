@@ -47,6 +47,8 @@ pub const SUN_CLICK_MARGIN: f32 = 15.0;
 pub const SUN_BANK: (f32, f32) = (15.0, 0.0);
 pub const SUN_FLY_DIVISOR: f32 = 21.0;
 pub const SUN_SCORE_DISTANCE: f32 = 8.0;
+/// Ticks the sun counter flashes red after a too-expensive click.
+pub const OUT_OF_MONEY_TICKS: u32 = 70;
 
 // --- Plants (original) -----------------------------------------------------
 pub const PLANT_HEALTH: i32 = 300;

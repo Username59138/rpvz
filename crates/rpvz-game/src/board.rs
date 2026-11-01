@@ -12,8 +12,9 @@ use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use rpvz_formats::ParticleDef;
 use rpvz_sim::consts::{BOARD_OFFSET, CELL_W, LAWN_X, TICKS_PER_SECOND};
-use rpvz_sim::{Event, Id, Level, MowerState, Outcome, Sim, ZombieState};
+use rpvz_sim::{Event, Id, Level, MowerState, Outcome, Sim, Tutorial, ZombieState};
 
+use crate::advice::flashing_gray;
 use crate::config::Config;
 use crate::input::{Pointer, Typed};
 use crate::library::Library;
@@ -28,6 +29,10 @@ use crate::ui::UiAssets;
 
 pub struct BoardPlugin;
 
+/// The lawn's own update systems; tutorial visuals run after them.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BoardSet;
+
 impl Plugin for BoardPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Adventure), enter)
@@ -36,6 +41,7 @@ impl Plugin for BoardPlugin {
                 Update,
                 (input, step, sync_views, hud, outcome)
                     .chain()
+                    .in_set(BoardSet)
                     .before(ReanimSet::Advance)
                     .run_if(in_state(GameState::Adventure)),
             );
@@ -55,14 +61,16 @@ const COST_RIGHT_TOP: Vec2 = Vec2::new(32.0, 54.0);
 const COST_FONT: &str = "FONT_PICO129";
 /// The recharge shade covers `68 * part + 2` pixels from the top.
 const RECHARGE_SHADE_H: f32 = 68.0;
-/// Ticks the sun counter flashes red after trying to spend too much.
-const OUT_OF_MONEY_TICKS: u32 = 70;
 const SUN_TEXT: Vec2 = Vec2::new(34.0, 78.0);
 /// Unusable packets are drawn at half brightness in sRGB, like a 128/255
 /// colour multiply. Blending happens in linear space, where that is
 /// 0.5^2.2 ≈ 0.22, hence alpha 0.78.
 const SHADE: Color = Color::srgba(0.0, 0.0, 0.0, 0.78);
-const SOD_1ROW: Vec2 = Vec2::new(239.0 - BOARD_OFFSET, 265.0);
+pub const SOD_1ROW: Vec2 = Vec2::new(239.0 - BOARD_OFFSET, 265.0);
+pub const SOD_IMAGE: &str = "IMAGE_SOD1ROW";
+/// Tutorial arrow over a seed packet, and the flash of a recharged packet.
+pub const ARROW_EFFECT: &str = "SeedPacketPick";
+pub const FLASH_EFFECT: &str = "SeedPacketFlash";
 
 // Placement of animations relative to game objects.
 /// The zombie reanim sits at its position + (15, -8); the sim's `x` is the
@@ -147,20 +155,18 @@ const HEAD_DZ: f32 = 0.5;
 pub struct Board {
     pub sim: Sim,
     acc: f32,
-    selected: Option<usize>,
     views: HashMap<Id, Entity>,
     mowers: HashMap<usize, Entity>,
     defs: HashMap<&'static str, Arc<ReanimDef>>,
-    effects: HashMap<&'static str, Arc<ParticleDef>>,
+    pub(crate) effects: HashMap<&'static str, Arc<ParticleDef>>,
     ended_at: Option<f32>,
     /// Events of the ticks run this frame.
-    events: Vec<Event>,
-    /// Tick until which the sun counter flashes.
-    out_of_money_until: u32,
+    pub(crate) events: Vec<Event>,
 }
 
+/// Everything spawned for the lawn; despawned on leaving it.
 #[derive(Component)]
-struct BoardEntity;
+pub struct BoardEntity;
 
 #[derive(Component)]
 struct ZombieView {
@@ -291,7 +297,7 @@ fn stem_frames(def: &ReanimDef) -> Option<Vec<(f32, f32)>> {
     Some(frames.iter().map(|f| (f.x, f.y)).collect())
 }
 
-fn packet_pos(i: usize) -> Vec2 {
+pub fn packet_pos(i: usize) -> Vec2 {
     Vec2::new(PACKET_X + i as f32 * PACKET_STEP, PACKET_Y)
 }
 
@@ -314,7 +320,7 @@ fn enter(
     info!("level 1-1, seed {seed}");
 
     let mut effects = HashMap::new();
-    for name in [ARM_DROP.0, HEAD_DROP.0] {
+    for name in [ARM_DROP.0, HEAD_DROP.0, ARROW_EFFECT, FLASH_EFFECT] {
         match ui.library.load_particles(name) {
             Ok(d) => {
                 effects.insert(name, d);
@@ -341,14 +347,7 @@ fn enter(
         Z_BACKGROUND,
         None,
     );
-    sprite(
-        &mut commands,
-        &mut ui,
-        "IMAGE_SOD1ROW",
-        SOD_1ROW,
-        Z_SOD,
-        None,
-    );
+    sprite(&mut commands, &mut ui, SOD_IMAGE, SOD_1ROW, Z_SOD, None);
     sprite(
         &mut commands,
         &mut ui,
@@ -466,14 +465,12 @@ fn enter(
     commands.insert_resource(Board {
         sim,
         acc: 0.0,
-        selected: None,
         views: HashMap::new(),
         mowers: HashMap::new(),
         defs,
         effects,
         ended_at: None,
         events: Vec::new(),
-        out_of_money_until: 0,
     });
 }
 
@@ -490,40 +487,32 @@ fn input(
     mouse: Res<ButtonInput<MouseButton>>,
     mut board: ResMut<Board>,
 ) {
+    let sim = &mut board.sim;
     if typed.escape || mouse.just_pressed(MouseButton::Right) {
-        board.selected = None;
+        sim.drop_cursor();
     }
     let (Some(pos), true) = (pointer.pos, pointer.just_pressed) else {
         return;
     };
     // Sun first: it floats above everything.
-    if board.sim.collect_sun_at(pos.x, pos.y).is_some() {
+    if sim.collect_sun_at(pos.x, pos.y).is_some() {
         return;
     }
-    for i in 0..board.sim.seeds.len() {
+    for i in 0..sim.seeds.len() {
         let r = Rect::from_corners(packet_pos(i), packet_pos(i) + Vec2::new(PACKET_W, PACKET_H));
         if r.contains(pos) {
-            let (ready, affordable) = {
-                let sim = &board.sim;
-                let s = &sim.seeds[i];
-                (sim.tick >= s.ready_at, sim.sun >= s.kind.cost())
-            };
-            if ready && !affordable {
-                board.out_of_money_until = board.sim.tick + OUT_OF_MONEY_TICKS;
+            // Clicking the bank with a plant in hand puts it back.
+            if sim.cursor.is_some() {
+                sim.drop_cursor();
+            } else if let Err(e) = sim.click_seed(i) {
+                info!("can't pick up packet {i}: {e:?}");
             }
-            let usable = ready && affordable;
-            board.selected = if board.selected == Some(i) || !usable {
-                None
-            } else {
-                Some(i)
-            };
             return;
         }
     }
-    if let (Some(seed), Some((col, row))) = (board.selected, Sim::cell_at(pos.x, pos.y)) {
-        match board.sim.plant(seed, col, row) {
-            Ok(_) => board.selected = None,
-            Err(e) => info!("can't plant at {col},{row}: {e:?}"),
+    if let (Some(seed), Some((col, row))) = (sim.cursor, Sim::cell_at(pos.x, pos.y)) {
+        if let Err(e) = sim.plant(seed, col, row) {
+            info!("can't plant at {col},{row}: {e:?}");
         }
     }
 }
@@ -852,7 +841,7 @@ fn hud(
             t.text = s;
         }
         // Red for 10 of every 20 ticks while the counter runs down.
-        let left = board.out_of_money_until.saturating_sub(sim.tick);
+        let left = sim.out_of_money;
         let color = if left > 0 && left % 20 < 10 {
             Color::srgb(1.0, 0.0, 0.0)
         } else {
@@ -865,10 +854,26 @@ fn hud(
     for (shade, mut sprite, mut vis) in &mut shades {
         let seed = &sim.seeds[shade.packet];
         let progress = seed.recharge_progress(sim.tick);
-        let usable =
-            progress >= 1.0 && sim.sun >= seed.kind.cost() && board.selected != Some(shade.packet);
+        // A picked-up packet is deactivated: fully dark, like one that
+        // hasn't started recharging.
+        let picked = sim.cursor == Some(shade.packet);
+        let usable = progress >= 1.0 && sim.sun >= seed.kind.cost() && !picked;
+        // The tutorial makes a waiting peashooter packet flash.
+        let flashing = sim.tutorial.state == Tutorial::PickUpPeashooter
+            && sim.tutorial.timer == -1
+            && !shade.recharge;
+        if flashing {
+            let gray = flashing_gray(sim.tick);
+            sprite.color = Color::srgba(0.0, 0.0, 0.0, 1.0 - gray.powf(2.2));
+            sprite.custom_size = Some(Vec2::new(PACKET_W, PACKET_H));
+            *vis = Visibility::Inherited;
+            continue;
+        }
+        sprite.color = SHADE;
         let height = if shade.recharge {
-            if progress < 1.0 {
+            if picked {
+                1.0
+            } else if progress < 1.0 {
                 ((RECHARGE_SHADE_H * (1.0 - progress)).round() + 2.0) / PACKET_H
             } else {
                 0.0
@@ -885,12 +890,12 @@ fn hud(
             Visibility::Hidden
         };
     }
-    let cell = board.selected.zip(pointer.pos).and_then(|(seed, p)| {
+    let cell = sim.cursor.zip(pointer.pos).and_then(|(seed, p)| {
         Sim::cell_at(p.x, p.y).filter(|&(c, r)| sim.can_plant(seed, c, r).is_ok())
     });
     for (mut origin, mut vis, held) in &mut cursor_plants {
         let at = if held {
-            board.selected.and(pointer.pos).map(|p| p - HELD_GRIP)
+            sim.cursor.and(pointer.pos).map(|p| p - HELD_GRIP)
         } else {
             cell.map(|(c, r)| Vec2::new(LAWN_X + c as f32 * CELL_W, Sim::row_y(r)))
         };
@@ -967,7 +972,7 @@ mod tests {
         assert!(def(SUN).track_index("Sun1").is_some());
         for id in [
             "IMAGE_BACKGROUND1UNSODDED",
-            "IMAGE_SOD1ROW",
+            SOD_IMAGE,
             "IMAGE_SEEDBANK",
             "IMAGE_SEEDS",
             "IMAGE_PROJECTILEPEA",

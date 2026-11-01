@@ -6,8 +6,10 @@
 //! edge of its hit box.
 
 pub mod consts;
+pub mod tutorial;
 
 use consts::*;
+pub use tutorial::{Advice, AdviceShown, Tutorial, TutorialState};
 
 /// Small deterministic RNG (xorshift64*).
 #[derive(Debug, Clone)]
@@ -225,6 +227,8 @@ pub enum Event {
     ZombieDied(Id),
     ZombieRemoved(Id),
     MowerStarted(usize),
+    /// A seed packet finished recharging.
+    SeedRefreshed(usize),
     WaveStarted {
         wave: u32,
         last: bool,
@@ -249,6 +253,8 @@ pub struct Level {
     pub rows: [bool; ROWS],
     pub waves: u32,
     pub seeds: Vec<PlantKind>,
+    /// Run the first-time tutorial (1-1 until adventure is finished once).
+    pub tutorial: bool,
 }
 
 impl Level {
@@ -259,6 +265,7 @@ impl Level {
             rows: [false, false, true, false, false],
             waves: WAVES_1_1,
             seeds: vec![PlantKind::Peashooter],
+            tutorial: true,
         }
     }
 }
@@ -304,6 +311,12 @@ pub struct Sim {
     suns_fallen: u32,
     next_id: Id,
     stem: Option<Vec<(f32, f32)>>,
+    /// Tutorial state and the message on screen.
+    pub tutorial: TutorialState,
+    /// Seed packet picked up (the plant under the cursor).
+    pub cursor: Option<usize>,
+    /// Ticks the sun counter flashes red for after trying to spend too much.
+    pub out_of_money: u32,
 }
 
 /// The original's `GetRectOverlap` on the x axis: how far `[a0, a1)` and
@@ -357,6 +370,9 @@ impl Sim {
             suns_fallen: 0,
             next_id: 1,
             stem: None,
+            tutorial: TutorialState::new(),
+            cursor: None,
+            out_of_money: 0,
         }
     }
 
@@ -423,6 +439,14 @@ impl Sim {
             anim_time: 0.0,
         });
         self.events.push(Event::Planted(id));
+        if self.tutorial.state == Tutorial::PlantPeashooter {
+            self.set_tutorial(if self.plants.len() >= 2 {
+                Tutorial::Completed
+            } else {
+                Tutorial::RefreshPeashooter
+            });
+        }
+        self.drop_cursor();
         Ok(id)
     }
 
@@ -438,7 +462,106 @@ impl Sim {
         }
         let id = s.id;
         self.events.push(Event::SunClicked(id));
+        if self.level.tutorial {
+            self.tutorial.show(Advice::ClickedOnSun, true);
+        }
         Some(id)
+    }
+
+    /// Clicks a seed packet: picks it up if it is ready and affordable.
+    pub fn click_seed(&mut self, seed: usize) -> Result<(), PlantError> {
+        let s = self.seeds.get(seed).ok_or(PlantError::OutOfBounds)?;
+        let tutorial_hints = self.level.tutorial && self.tutorial.was_shown(Advice::ClickOnSun);
+        if self.tick < s.ready_at {
+            if tutorial_hints {
+                self.tutorial.show(Advice::SeedRefresh, false);
+            }
+            return Err(PlantError::Recharging);
+        }
+        if self.sun < s.kind.cost() {
+            self.out_of_money = OUT_OF_MONEY_TICKS;
+            if tutorial_hints {
+                self.tutorial.show(Advice::CantAffordPlant, false);
+            }
+            return Err(PlantError::NotEnoughSun);
+        }
+        self.cursor = Some(seed);
+        if self.tutorial.state == Tutorial::PickUpPeashooter {
+            self.set_tutorial(Tutorial::PlantPeashooter);
+        }
+        Ok(())
+    }
+
+    /// Puts back the plant under the cursor (`ClearCursor`).
+    pub fn drop_cursor(&mut self) {
+        self.cursor = None;
+        if self.tutorial.state == Tutorial::PlantPeashooter {
+            self.set_tutorial(Tutorial::PickUpPeashooter);
+        }
+    }
+
+    /// `SetTutorialState`.
+    fn set_tutorial(&mut self, state: Tutorial) {
+        use tutorial::*;
+        let t = &mut self.tutorial;
+        t.state = state;
+        match state {
+            Tutorial::PickUpPeashooter => {
+                if self.plants.is_empty() {
+                    t.arrow = Some(0);
+                    t.show(Advice::ClickSeedPacket, true);
+                } else {
+                    t.show(Advice::EnoughSun, true);
+                    t.timer = ENOUGH_SUN_WAIT;
+                }
+            }
+            Tutorial::PlantPeashooter => {
+                t.timer = -1;
+                t.arrow = None;
+                if self.plants.is_empty() {
+                    t.show(Advice::ClickOnGrass, true);
+                } else {
+                    t.clear();
+                }
+            }
+            Tutorial::RefreshPeashooter => {
+                t.show(Advice::PlantedPeashooter, true);
+                self.sky_sun_countdown = FIRST_SUN_AFTER_PLANT;
+            }
+            Tutorial::Completed => {
+                t.show(Advice::ZombieOnslaught, false);
+                self.wave_countdown = ONSLAUGHT_COUNTDOWN;
+            }
+            Tutorial::Off => {}
+        }
+    }
+
+    /// `UpdateTutorial`: the reminder after waiting with a ready packet.
+    fn update_tutorial(&mut self) {
+        let t = &mut self.tutorial;
+        if t.timer > 0 {
+            t.timer -= 1;
+        }
+        if t.state == Tutorial::PickUpPeashooter && t.timer == 0 {
+            t.show(Advice::ClickPeashooter, true);
+            // The original points at packet 1 here, which 1-1 doesn't have;
+            // the message is about the peashooter, packet 0.
+            t.arrow = Some(0);
+            t.timer = -1;
+        }
+    }
+
+    /// Packets that finish recharging this tick.
+    fn update_seeds(&mut self) {
+        for i in 0..self.seeds.len() {
+            let s = &self.seeds[i];
+            if s.last_planted.is_some() && s.ready_at == self.tick {
+                self.events.push(Event::SeedRefreshed(i));
+                if self.tutorial.state == Tutorial::RefreshPeashooter {
+                    self.set_tutorial(Tutorial::PickUpPeashooter);
+                }
+            }
+        }
     }
 
     /// Advances one tick. Events of the tick are in [`Self::events`].
@@ -448,6 +571,10 @@ impl Sim {
             return;
         }
         self.tick += 1;
+        if self.tick == 1 && self.level.tutorial {
+            self.set_tutorial(Tutorial::PickUpPeashooter);
+        }
+        self.update_seeds();
         self.update_sky_sun();
         self.update_suns();
         self.update_waves();
@@ -455,10 +582,21 @@ impl Sim {
         self.update_peas();
         self.update_zombies();
         self.update_mowers();
+        self.out_of_money = self.out_of_money.saturating_sub(1);
+        self.tutorial.tick_advice();
+        self.update_tutorial();
         self.check_end();
     }
 
     fn update_sky_sun(&mut self) {
+        // The tutorial keeps the sky empty until the first plant is in.
+        if matches!(
+            self.tutorial.state,
+            Tutorial::PickUpPeashooter | Tutorial::PlantPeashooter
+        ) && self.plants.is_empty()
+        {
+            return;
+        }
         self.sky_sun_countdown = self.sky_sun_countdown.saturating_sub(1);
         if self.sky_sun_countdown > 0 {
             return;
@@ -479,6 +617,9 @@ impl Sim {
             state: SunState::Falling,
         });
         self.events.push(Event::SunSpawned(id));
+        if self.level.tutorial {
+            self.tutorial.show(Advice::ClickOnSun, true);
+        }
     }
 
     fn update_suns(&mut self) {
@@ -540,7 +681,7 @@ impl Sim {
     }
 
     fn update_waves(&mut self) {
-        if self.wave >= self.level.waves {
+        if self.wave >= self.level.waves || self.tutorial.state.holds_waves() {
             return;
         }
         // A wave worn down enough calls the next one early.

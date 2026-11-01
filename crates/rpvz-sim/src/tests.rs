@@ -1,7 +1,15 @@
 use super::*;
 
+/// 1-1 without the tutorial (it holds the zombies back).
 fn one_one() -> Sim {
-    Sim::new(Level::one_one(), 42)
+    Sim::new(no_tutorial(), 42)
+}
+
+fn no_tutorial() -> Level {
+    Level {
+        tutorial: false,
+        ..Level::one_one()
+    }
 }
 
 /// Fires `n` peas straight into a zombie, as damage events.
@@ -135,7 +143,7 @@ fn peashooter_fires_every_one_and_a_half_seconds() {
 /// Plays 1-1 with a simple strategy: collect every sun, keep planting
 /// peashooters from the left.
 fn play(seed: u64, defend: bool) -> (Sim, Vec<Event>) {
-    let mut sim = Sim::new(Level::one_one(), seed);
+    let mut sim = Sim::new(no_tutorial(), seed);
     let mut log = Vec::new();
     while sim.outcome.is_none() && sim.tick < 100 * 60 * 10 {
         if defend {
@@ -284,4 +292,69 @@ fn sun_box_click_margin_and_lifetime() {
     }
     let expected = fall + consts::SUN_LIFETIME + consts::SUN_FADE;
     assert!(ticks.abs_diff(expected) <= 2, "{ticks} vs {expected}");
+}
+
+#[test]
+fn first_time_one_one_walks_through_the_tutorial() {
+    let mut sim = Sim::new(Level::one_one(), 7);
+    let advice = |sim: &Sim| sim.tutorial.advice.map(|a| a.advice);
+    sim.step();
+    assert_eq!(sim.tutorial.state, Tutorial::PickUpPeashooter);
+    assert_eq!(advice(&sim), Some(Advice::ClickSeedPacket));
+    assert_eq!(sim.tutorial.arrow, Some(0));
+    // Nothing falls or attacks while waiting for the first plant.
+    sim.run(3000);
+    assert!(sim.suns.is_empty() && sim.zombies.is_empty());
+
+    sim.click_seed(0).unwrap();
+    assert_eq!(sim.tutorial.state, Tutorial::PlantPeashooter);
+    assert_eq!(advice(&sim), Some(Advice::ClickOnGrass));
+    assert_eq!(sim.tutorial.arrow, None);
+    // Putting it back goes back a step.
+    sim.drop_cursor();
+    assert_eq!(sim.tutorial.state, Tutorial::PickUpPeashooter);
+    sim.click_seed(0).unwrap();
+    sim.plant(0, 0, 2).unwrap();
+    assert_eq!(sim.cursor, None);
+    assert_eq!(sim.tutorial.state, Tutorial::RefreshPeashooter);
+    assert_eq!(advice(&sim), Some(Advice::PlantedPeashooter));
+
+    // The first sun falls 400 ticks later and asks to be clicked.
+    sim.run(400);
+    assert_eq!(sim.suns.len(), 1);
+    assert_eq!(advice(&sim), Some(Advice::ClickOnSun));
+    // The packet recharges: "enough sun", then a reminder 400 ticks on.
+    while sim.tutorial.state == Tutorial::RefreshPeashooter {
+        sim.step();
+    }
+    assert_eq!(sim.tutorial.state, Tutorial::PickUpPeashooter);
+    assert_eq!(advice(&sim), Some(Advice::EnoughSun));
+    sim.run(400);
+    assert_eq!(advice(&sim), Some(Advice::ClickPeashooter));
+    assert!(sim.zombies.is_empty(), "still no zombies");
+
+    // The second peashooter ends the tutorial; zombies 99 ticks later.
+    sim.sun = 100;
+    sim.click_seed(0).unwrap();
+    sim.plant(0, 1, 2).unwrap();
+    assert_eq!(sim.tutorial.state, Tutorial::Completed);
+    assert_eq!(advice(&sim), Some(Advice::ZombieOnslaught));
+    let start = sim.tick;
+    while sim.zombies.is_empty() {
+        sim.step();
+        assert!(sim.tick - start < 200);
+    }
+    assert_eq!(sim.tick - start, 99);
+    // The onslaught message goes after 500 ticks.
+    sim.run(500);
+    assert_eq!(advice(&sim), None);
+}
+
+#[test]
+fn too_expensive_packet_flashes_the_counter() {
+    let mut sim = one_one();
+    sim.sun = 50;
+    assert_eq!(sim.click_seed(0), Err(PlantError::NotEnoughSun));
+    assert_eq!(sim.out_of_money, consts::OUT_OF_MONEY_TICKS);
+    assert_eq!(sim.cursor, None);
 }
