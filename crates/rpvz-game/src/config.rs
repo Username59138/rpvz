@@ -29,11 +29,17 @@ pub struct Automation {
     pub cursor: Option<Vec2>,
     /// Simulated second at which a left click happens.
     pub click_at: Option<f32>,
+    /// Keys typed at a simulated second; `{enter}`, `{esc}` and `{bs}` are
+    /// special keys, everything else is text.
+    pub keys: Vec<(f32, String)>,
 }
 
 impl Automation {
     pub fn active(&self) -> bool {
-        self.screenshot.is_some() || self.cursor.is_some() || self.click_at.is_some()
+        self.screenshot.is_some()
+            || self.cursor.is_some()
+            || self.click_at.is_some()
+            || !self.keys.is_empty()
     }
 }
 
@@ -56,6 +62,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             "--screenshot" => cfg.automation.screenshot = Some(value("--screenshot")?.into()),
             "--at" => cfg.automation.at = parse_f32(&value("--at")?)?,
             "--click-at" => cfg.automation.click_at = Some(parse_f32(&value("--click-at")?)?),
+            "--type-at" => {
+                let at = parse_f32(&value("--type-at")?)?;
+                let text = value("--type-at")?;
+                cfg.automation.keys.push((at, text));
+            }
             "--cursor" => {
                 let v = value("--cursor")?;
                 let (x, y) = v.split_once(',').ok_or("--cursor takes X,Y")?;
@@ -81,4 +92,5 @@ const HELP: &str = "rpvz [options]
   --screenshot FILE    save a screenshot and exit
   --at SECONDS         simulated time of the screenshot (default 0)
   --cursor X,Y         fake cursor position (game coordinates)
-  --click-at SECONDS   simulated left click";
+  --click-at SECONDS   simulated left click
+  --type-at SECONDS T  type T at that time ({enter}, {esc}, {bs} are keys)";

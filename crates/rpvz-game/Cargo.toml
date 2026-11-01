@@ -12,7 +12,10 @@ name = "rpvz"
 path = "src/main.rs"
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ab_glyph = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 rpvz-assets = { path = "../rpvz-assets" }
 rpvz-formats = { path = "../rpvz-formats" }
 bevy = { version = "0.20", default-features = false, features = ["2d", "ui", "jpeg"] }

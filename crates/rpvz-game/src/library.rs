@@ -19,6 +19,8 @@ struct Layer {
     /// Ids from `resources.xml` or `resources.json`, mapped to a path without
     /// extension (relative to `dir`).
     ids: HashMap<String, String>,
+    /// Font ids (`FONT_...`) mapped to descriptor paths relative to `dir`.
+    fonts: HashMap<String, String>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -33,8 +35,10 @@ impl Library {
         let mut layers = Vec::new();
         let pc = assets.join("pc");
         if pc.is_dir() {
+            let (ids, fonts) = read_resources_xml(&pc);
             layers.push(Layer {
-                ids: read_resources_xml(&pc),
+                ids,
+                fonts,
                 dir: pc,
             });
         }
@@ -42,6 +46,7 @@ impl Library {
         if goty.is_dir() {
             layers.push(Layer {
                 ids: read_goty_index(&goty),
+                fonts: HashMap::new(),
                 dir: goty,
             });
         }
@@ -56,9 +61,11 @@ impl Library {
 
     /// A single PC-style directory, e.g. a placeholder pack.
     pub fn from_dir(dir: &Path) -> Self {
+        let (ids, fonts) = read_resources_xml(dir);
         Self {
             layers: vec![Layer {
-                ids: read_resources_xml(dir),
+                ids,
+                fonts,
                 dir: dir.to_owned(),
             }],
         }
@@ -92,6 +99,22 @@ impl Library {
         None
     }
 
+    /// A file by relative path (lower-case), first layer that has it.
+    pub fn file(&self, rel: &str) -> Option<PathBuf> {
+        self.layers
+            .iter()
+            .map(|l| l.dir.join(rel))
+            .find(|p| p.is_file())
+    }
+
+    /// Descriptor file of a font id such as `FONT_DWARVENTODCRAFT18`.
+    pub fn font_path(&self, id: &str) -> Option<PathBuf> {
+        self.layers
+            .iter()
+            .find_map(|l| l.fonts.get(id).map(|p| l.dir.join(p)))
+            .filter(|p| p.is_file())
+    }
+
     pub fn reanim_path(&self, name: &str) -> Option<PathBuf> {
         let file = format!(
             "compiled/reanim/{}.reanim.compiled",
@@ -115,11 +138,12 @@ impl Library {
 }
 
 /// `resources.xml`: `<SetDefaults path=".." idprefix=".."/>` then
-/// `<Image id=".." path=".."/>` entries.
-fn read_resources_xml(dir: &Path) -> HashMap<String, String> {
-    let mut out = HashMap::new();
+/// `<Image id=".." path=".."/>` and `<Font .../>` entries. Returns image and
+/// font maps, both with lower-case paths.
+fn read_resources_xml(dir: &Path) -> (HashMap<String, String>, HashMap<String, String>) {
+    let (mut images, mut fonts) = (HashMap::new(), HashMap::new());
     let Ok(bytes) = std::fs::read(dir.join("properties/resources.xml")) else {
-        return out;
+        return (images, fonts);
     };
     let text = String::from_utf8_lossy(&bytes);
     let attr = |tag: &str, name: &str| -> Option<String> {
@@ -133,19 +157,24 @@ fn read_resources_xml(dir: &Path) -> HashMap<String, String> {
         if tag.starts_with("SetDefaults") {
             prefix = attr(tag, "idprefix").unwrap_or_default();
             base = attr(tag, "path").unwrap_or_default();
-        } else if tag.starts_with("Image") {
-            if let (Some(id), Some(path)) = (attr(tag, "id"), attr(tag, "path")) {
-                let path = path.replace('\\', "/").to_ascii_lowercase();
-                let full = if base.is_empty() {
-                    path
-                } else {
-                    format!("{}/{path}", base.to_ascii_lowercase())
-                };
-                out.insert(format!("{prefix}{id}"), full);
-            }
+            continue;
+        }
+        let is_image = tag.starts_with("Image");
+        if !is_image && !tag.starts_with("Font") {
+            continue;
+        }
+        if let (Some(id), Some(path)) = (attr(tag, "id"), attr(tag, "path")) {
+            let path = path.replace('\\', "/").to_ascii_lowercase();
+            let full = if base.is_empty() {
+                path
+            } else {
+                format!("{}/{path}", base.to_ascii_lowercase())
+            };
+            let map = if is_image { &mut images } else { &mut fonts };
+            map.insert(format!("{prefix}{id}"), full);
         }
     }
-    out
+    (images, fonts)
 }
 
 fn read_goty_index(dir: &Path) -> HashMap<String, String> {
@@ -169,12 +198,17 @@ pub fn decode_image(path: &Path) -> Result<image::RgbaImage, String> {
     let mut rgba = image::open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .to_rgba8();
-    let is_jpg = path
+    // JPG (and some GIF) images keep their alpha in a `name_.png|gif` beside them.
+    let has_alpha_companion = path
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("jpg"));
-    if is_jpg && let Some(stem) = path.file_stem() {
-        let mask = path.with_file_name(format!("{}_.png", stem.to_string_lossy()));
-        if mask.is_file() {
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("gif"));
+    if has_alpha_companion && let Some(stem) = path.file_stem() {
+        let stem = stem.to_string_lossy();
+        let mask = ["png", "gif"]
+            .iter()
+            .map(|ext| path.with_file_name(format!("{stem}_.{ext}")))
+            .find(|p| p.is_file());
+        if let Some(mask) = mask {
             let alpha = image::open(&mask)
                 .map_err(|e| format!("{}: {e}", mask.display()))?
                 .to_luma8();
@@ -240,6 +274,41 @@ pub fn bleed_alpha(img: &mut image::RgbaImage, passes: u32) {
             known[(y * w + x) as usize] = true;
         }
     }
+}
+
+/// A font page `stem` from the directory of `descriptor`: `stem.png|gif|jpg`
+/// in colour (with the usual `_` alpha companion for JPG), or only an alpha
+/// map `_stem.png|gif`, drawn white.
+pub fn font_page_path(descriptor: &Path, stem: &str) -> Option<(PathBuf, bool)> {
+    let dir = descriptor.parent()?;
+    let stem = stem.to_ascii_lowercase();
+    for ext in ["png", "gif", "jpg"] {
+        let p = dir.join(format!("{stem}.{ext}"));
+        if p.is_file() {
+            return Some((p, false));
+        }
+    }
+    for ext in ["png", "gif"] {
+        let p = dir.join(format!("_{stem}.{ext}"));
+        if p.is_file() {
+            return Some((p, true));
+        }
+    }
+    None
+}
+
+/// Decodes a font page; alpha-only pages become white with that alpha.
+pub fn decode_font_page(path: &Path, alpha_only: bool) -> Result<image::RgbaImage, String> {
+    if !alpha_only {
+        return decode_image(path);
+    }
+    let luma = image::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .to_luma8();
+    let (w, h) = luma.dimensions();
+    Ok(image::RgbaImage::from_fn(w, h, |x, y| {
+        image::Rgba([255, 255, 255, luma.get_pixel(x, y).0[0]])
+    }))
 }
 
 /// Image size without decoding pixels.

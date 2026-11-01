@@ -9,14 +9,14 @@ use rpvz_formats::reanim::{ImageRef, RawFrame, Reanim, Track, Variant, write_com
 
 type Rgba = [u8; 4];
 
-struct Canvas {
+pub(crate) struct Canvas {
     w: u32,
     h: u32,
     px: Vec<u8>,
 }
 
 impl Canvas {
-    fn new(w: u32, h: u32) -> Self {
+    pub(crate) fn new(w: u32, h: u32) -> Self {
         Self {
             w,
             h,
@@ -24,15 +24,24 @@ impl Canvas {
         }
     }
 
-    fn set(&mut self, x: u32, y: u32, c: Rgba) {
+    pub(crate) fn set(&mut self, x: u32, y: u32, c: Rgba) {
         if x < self.w && y < self.h {
             let i = ((y * self.w + x) * 4) as usize;
             self.px[i..i + 4].copy_from_slice(&c);
         }
     }
 
+    pub(crate) fn get(&self, x: u32, y: u32) -> Rgba {
+        if x < self.w && y < self.h {
+            let i = ((y * self.w + x) * 4) as usize;
+            [self.px[i], self.px[i + 1], self.px[i + 2], self.px[i + 3]]
+        } else {
+            [0; 4]
+        }
+    }
+
     /// Rounded rectangle with a darker border.
-    fn panel(mut self, fill: Rgba, border: Rgba, radius: f32) -> Self {
+    pub(crate) fn panel(mut self, fill: Rgba, border: Rgba, radius: f32) -> Self {
         let (w, h) = (self.w as f32, self.h as f32);
         for y in 0..self.h {
             for x in 0..self.w {
@@ -78,7 +87,7 @@ impl Canvas {
         self
     }
 
-    fn save(&self, path: &Path) -> Result<(), String> {
+    pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
@@ -156,6 +165,10 @@ pub fn write(dir: &Path) -> Result<(), String> {
     Canvas::new(150, 120)
         .panel([150, 110, 70, 255], [90, 60, 35, 255], 10.0)
         .save(&img("woodsign1"))?;
+    Canvas::new(120, 34)
+        .panel([170, 130, 85, 255], [90, 60, 35, 255], 8.0)
+        .save(&img("woodsign2"))?;
+    crate::devpack_ui::write(dir)?;
 
     let buttons: [(&str, &str, &str, Rgba); 4] = [
         (
@@ -220,6 +233,14 @@ pub fn write(dir: &Path) -> Result<(), String> {
                 6.0 * ((i - OPEN) as f32 * 0.21).sin()
             }
         },
+    ));
+    // A small plank under the sign: clicking it renames the player.
+    tracks.push(moving(
+        "woodsign2",
+        "IMAGE_REANIM_SELECTORSCREEN_WOODSIGN2",
+        |i| (75.0, -20.0 + 230.0 * ease_in(i, 0)),
+        |_| 0.0,
+        |_| 0.0,
     ));
     for (n, (track, file, highlight, color)) in buttons.iter().enumerate() {
         let border = color.map(|c| c / 2);

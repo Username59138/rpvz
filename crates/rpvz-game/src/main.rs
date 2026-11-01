@@ -3,11 +3,16 @@
 mod automation;
 mod config;
 mod devpack;
+mod devpack_ui;
 mod input;
 mod library;
 mod menu;
+mod profile;
 mod reanim;
 mod state;
+mod strings;
+mod text;
+mod ui;
 
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
@@ -38,13 +43,15 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let library = match open_library(&cfg) {
+    let (library, save_dir) = match open_library(&cfg) {
         Ok(lib) => lib,
         Err(e) => {
             eprintln!("{e}");
             return std::process::ExitCode::FAILURE;
         }
     };
+    let strings = strings::Strings::load(&library);
+    let profiles = profile::Profiles::load(save_dir.join(profile::PROFILES_FILE));
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -58,11 +65,16 @@ fn main() -> std::process::ExitCode {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(cfg)
         .insert_resource(library)
+        .insert_resource(strings)
+        .insert_resource(profiles)
         .add_plugins((
             reanim::ReanimPlugin,
+            text::TextPlugin,
             input::InputPlugin,
+            ui::UiPlugin,
             state::StatePlugin,
             menu::MenuPlugin,
+            profile::ProfilePlugin,
             automation::AutomationPlugin,
         ))
         .add_systems(Startup, camera)
@@ -70,9 +82,11 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-fn open_library(cfg: &Config) -> Result<Library, String> {
+/// The asset library and the directory for saves (profiles, settings): the
+/// placeholder pack dir, or the data dir that holds `assets/`.
+fn open_library(cfg: &Config) -> Result<(Library, std::path::PathBuf), String> {
     if let Some(dir) = &cfg.devpack {
-        return Ok(Library::from_dir(dir));
+        return Ok((Library::from_dir(dir), dir.clone()));
     }
     let assets = match &cfg.data {
         Some(d) => d.clone(),
@@ -80,7 +94,10 @@ fn open_library(cfg: &Config) -> Result<Library, String> {
             .map_err(|e| e.to_string())?
             .assets(),
     };
-    Library::from_install(&assets)
+    let save_dir = assets
+        .parent()
+        .map_or_else(|| assets.clone(), std::path::Path::to_path_buf);
+    Ok((Library::from_install(&assets)?, save_dir))
 }
 
 fn camera(mut commands: Commands) {

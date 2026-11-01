@@ -53,15 +53,15 @@ const HIDDEN_FOR_NEW_PLAYER: &[&str] = &[
 ];
 
 #[derive(Component)]
-struct MenuRoot;
+pub struct MenuRoot;
 
 #[derive(Component)]
 struct MenuMessage;
 
 #[derive(Resource)]
-struct MenuState {
+pub struct MenuState {
     /// Buttons react only after the opening animation.
-    ready: bool,
+    pub ready: bool,
     hovered: Option<usize>,
 }
 
@@ -178,12 +178,15 @@ fn buttons(
     mut players: Query<(&mut ReanimPlayer, &ReanimOrigin), With<MenuRoot>>,
     mut message: Query<&mut Text2d, With<MenuMessage>>,
     mut next: ResMut<NextState<GameState>>,
+    dialogs: Query<(), With<crate::ui::Dialog>>,
 ) {
     let Ok((mut player, origin)) = players.single_mut() else {
         return;
     };
     let mut hovered = None;
+    // A dialog on top takes all input.
     if state.ready
+        && dialogs.is_empty()
         && let Some(pos) = pointer.pos
     {
         // Last drawn = topmost, so test in reverse order.
