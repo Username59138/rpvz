@@ -122,17 +122,60 @@ pub struct Pea {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SunState {
     Falling,
-    Resting { age: u32 },
+    /// On the ground for `age` ticks.
+    Resting {
+        age: u32,
+    },
+    /// Fading out; `left` ticks to go.
+    Fading {
+        left: u32,
+    },
+    /// Flying to the sun counter; `distance` is the original's
+    /// `mCollectionDistance` (from the previous tick's position).
+    Collecting {
+        distance: f32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sun {
     pub id: Id,
-    /// Centre.
+    /// Top-left of the 60×60 sun box; the sun is drawn around its centre.
     pub x: f32,
     pub y: f32,
     pub ground_y: f32,
     pub state: SunState,
+}
+
+impl Sun {
+    pub fn centre(&self) -> (f32, f32) {
+        (self.x + SUN_SIZE / 2.0, self.y + SUN_SIZE / 2.0)
+    }
+
+    /// Drawing scale: shrinks on the way to the counter.
+    pub fn scale(&self) -> f32 {
+        match self.state {
+            SunState::Collecting { distance } => (distance * 0.05).clamp(0.5, 1.0),
+            _ => 1.0,
+        }
+    }
+
+    /// Drawing opacity: fades on the way to the counter and when expiring.
+    pub fn alpha(&self) -> f32 {
+        match self.state {
+            SunState::Collecting { distance } => (distance * 0.035).clamp(0.35, 1.0),
+            SunState::Fading { left } => left as f32 / SUN_FADE as f32,
+            _ => 1.0,
+        }
+    }
+
+    fn clickable_at(&self, x: f32, y: f32) -> bool {
+        !matches!(self.state, SunState::Collecting { .. })
+            && x >= self.x - SUN_CLICK_MARGIN
+            && x < self.x + SUN_SIZE + SUN_CLICK_MARGIN
+            && y >= self.y - SUN_CLICK_MARGIN
+            && y < self.y + SUN_SIZE + SUN_CLICK_MARGIN
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -159,6 +202,9 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     SunSpawned(Id),
+    /// The player clicked a sun; it flies to the counter.
+    SunClicked(Id),
+    /// A sun reached the counter and was added to it.
     SunCollected(Id),
     SunExpired(Id),
     Planted(Id),
@@ -380,16 +426,19 @@ impl Sim {
         Ok(id)
     }
 
-    /// Collects the sun under a board point, if any. Returns its id.
+    /// Starts collecting the sun under a board point, if any (the topmost,
+    /// i.e. the newest). The sun counter goes up when it arrives. Returns
+    /// its id.
     pub fn collect_sun_at(&mut self, x: f32, y: f32) -> Option<Id> {
-        let i = self
-            .suns
-            .iter()
-            .position(|s| (s.x - x).hypot(s.y - y) <= SUN_PICK_RADIUS)?;
-        let s = self.suns.remove(i);
-        self.sun += SUN_VALUE;
-        self.events.push(Event::SunCollected(s.id));
-        Some(s.id)
+        let s = self.suns.iter_mut().rev().find(|s| s.clickable_at(x, y))?;
+        // A fading sun keeps fading (the original checks the fade first)
+        // and vanishes without paying out.
+        if !matches!(s.state, SunState::Fading { .. }) {
+            s.state = SunState::Collecting { distance: f32::MAX };
+        }
+        let id = s.id;
+        self.events.push(Event::SunClicked(id));
+        Some(id)
     }
 
     /// Advances one tick. Events of the tick are in [`Self::events`].
@@ -414,10 +463,10 @@ impl Sim {
         if self.sky_sun_countdown > 0 {
             return;
         }
+        self.suns_fallen += 1;
         let delay =
             (SKY_SUN_COUNTDOWN + self.suns_fallen * SKY_SUN_SLOWDOWN).min(SKY_SUN_COUNTDOWN_MAX);
         self.sky_sun_countdown = delay + self.rng.below(SKY_SUN_COUNTDOWN_RANGE);
-        self.suns_fallen += 1;
         let id = self.id();
         let x = self.rng.range_i32(SKY_SUN_X_MIN, SKY_SUN_X_MAX) as f32;
         let ground_y =
@@ -434,19 +483,39 @@ impl Sim {
 
     fn update_suns(&mut self) {
         let mut expired = Vec::new();
+        let mut scored = Vec::new();
         for s in &mut self.suns {
             match &mut s.state {
                 SunState::Falling => {
-                    s.y += SKY_SUN_FALL_SPEED;
-                    if s.y >= s.ground_y {
+                    if s.y + SKY_SUN_FALL_SPEED < s.ground_y {
+                        s.y += SKY_SUN_FALL_SPEED;
+                    } else {
                         s.y = s.ground_y;
-                        s.state = SunState::Resting { age: 0 };
+                        s.x = s.x.round();
+                        // The landing tick already counts.
+                        s.state = SunState::Resting { age: 1 };
                     }
                 }
                 SunState::Resting { age } => {
                     *age += 1;
                     if *age >= SUN_LIFETIME {
+                        s.state = SunState::Fading { left: SUN_FADE };
+                    }
+                }
+                SunState::Fading { left } => {
+                    *left -= 1;
+                    if *left == 0 {
                         expired.push(s.id);
+                    }
+                }
+                SunState::Collecting { distance } => {
+                    let dx = (s.x - SUN_BANK.0).abs();
+                    let dy = (s.y - SUN_BANK.1).abs();
+                    s.x -= (s.x - SUN_BANK.0).signum() * dx / SUN_FLY_DIVISOR;
+                    s.y -= (s.y - SUN_BANK.1).signum() * dy / SUN_FLY_DIVISOR;
+                    *distance = dx.hypot(dy);
+                    if *distance < SUN_SCORE_DISTANCE {
+                        scored.push(s.id);
                     }
                 }
             }
@@ -454,6 +523,11 @@ impl Sim {
         for id in expired {
             self.suns.retain(|s| s.id != id);
             self.events.push(Event::SunExpired(id));
+        }
+        for id in scored {
+            self.suns.retain(|s| s.id != id);
+            self.sun += SUN_VALUE;
+            self.events.push(Event::SunCollected(id));
         }
     }
 

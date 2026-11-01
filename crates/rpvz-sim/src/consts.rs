@@ -35,10 +35,18 @@ pub const SKY_SUN_START_Y: f32 = 60.0;
 pub const SKY_SUN_FALL_SPEED: f32 = 0.67;
 pub const SKY_SUN_GROUND_MIN: i32 = 300;
 pub const SKY_SUN_GROUND_RANGE: i32 = 250;
-/// How long a landed sun stays before vanishing (approx.).
-pub const SUN_LIFETIME: u32 = 1000;
-/// Sun pickup radius around its centre (approx.).
-pub const SUN_PICK_RADIUS: f32 = 40.0;
+/// A sun is a 60×60 box (its position is the top-left corner).
+pub const SUN_SIZE: f32 = 60.0;
+/// Ticks a landed sun stays, then ticks it fades for.
+pub const SUN_LIFETIME: u32 = 750;
+pub const SUN_FADE: u32 = 15;
+/// Clicks count this far around the sun's box.
+pub const SUN_CLICK_MARGIN: f32 = 15.0;
+/// A collected sun flies to this point (top-left), covering 1/21 of the
+/// remaining distance per axis each tick, and scores closer than 8 px.
+pub const SUN_BANK: (f32, f32) = (15.0, 0.0);
+pub const SUN_FLY_DIVISOR: f32 = 21.0;
+pub const SUN_SCORE_DISTANCE: f32 = 8.0;
 
 // --- Plants (original) -----------------------------------------------------
 pub const PLANT_HEALTH: i32 = 300;

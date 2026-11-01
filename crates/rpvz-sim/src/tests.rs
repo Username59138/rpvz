@@ -93,10 +93,19 @@ fn first_sky_sun_and_its_value() {
     let first = first.expect("a sun fell");
     assert!((425..=700).contains(&first), "first sun at {first}");
     let s = sim.suns[0].clone();
+    let (cx, cy) = s.centre();
     let before = sim.sun;
-    assert_eq!(sim.collect_sun_at(s.x + 5.0, s.y - 5.0), Some(s.id));
+    assert_eq!(sim.collect_sun_at(cx + 5.0, cy - 5.0), Some(s.id));
+    assert_eq!(sim.sun, before, "paid when it reaches the counter");
+    assert_eq!(sim.collect_sun_at(cx, cy), None, "already on its way");
+    let mut ticks = 0;
+    while sim.sun == before {
+        sim.step();
+        ticks += 1;
+        assert!(ticks < 200, "never arrived");
+    }
     assert_eq!(sim.sun, before + 25);
-    assert_eq!(sim.collect_sun_at(s.x, s.y), None, "gone once collected");
+    assert!(sim.suns.iter().all(|x| x.id != s.id));
 }
 
 #[test]
@@ -130,7 +139,7 @@ fn play(seed: u64, defend: bool) -> (Sim, Vec<Event>) {
     let mut log = Vec::new();
     while sim.outcome.is_none() && sim.tick < 100 * 60 * 10 {
         if defend {
-            let landed: Vec<(f32, f32)> = sim.suns.iter().map(|s| (s.x, s.y)).collect();
+            let landed: Vec<(f32, f32)> = sim.suns.iter().map(Sun::centre).collect();
             for (x, y) in landed {
                 sim.collect_sun_at(x, y);
             }
@@ -248,4 +257,31 @@ fn zombie_spawns_just_off_the_lawn() {
         let x = sim.zombies.iter().find(|q| q.id == z).unwrap().x;
         assert!((816.0..856.0).contains(&x), "{x}");
     }
+}
+
+#[test]
+fn sun_box_click_margin_and_lifetime() {
+    let mut sim = one_one();
+    sim.run(700);
+    let s = sim.suns[0].clone();
+    // 15 px around the 60×60 box counts, 16 doesn't.
+    assert_eq!(
+        sim.clone().collect_sun_at(s.x - 15.0, s.y + 30.0),
+        Some(s.id)
+    );
+    assert_eq!(sim.clone().collect_sun_at(s.x - 16.0, s.y + 30.0), None);
+    assert_eq!(
+        sim.clone().collect_sun_at(s.x + 74.0, s.y + 74.0),
+        Some(s.id)
+    );
+    // Falls at 0.67 px a tick, then 750 ticks on the ground and 15 fading.
+    let fall = ((s.ground_y - s.y) / consts::SKY_SUN_FALL_SPEED).ceil() as u32;
+    let mut ticks: u32 = 0;
+    while sim.suns.iter().any(|x| x.id == s.id) {
+        sim.step();
+        ticks += 1;
+        assert!(ticks < 2000);
+    }
+    let expected = fall + consts::SUN_LIFETIME + consts::SUN_FADE;
+    assert!(ticks.abs_diff(expected) <= 2, "{ticks} vs {expected}");
 }

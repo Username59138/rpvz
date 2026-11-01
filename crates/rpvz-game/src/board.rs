@@ -67,8 +67,8 @@ const SOD_1ROW: Vec2 = Vec2::new(239.0 - BOARD_OFFSET, 265.0);
 const ZOMBIE_DRAW: Vec2 = Vec2::new(-36.0, -30.0);
 /// Typical basic-zombie speed the walk animation was made for.
 const ZOMBIE_ANIM_SPEED: f32 = 0.27;
-/// The sun reanim is drawn around its centre.
-const SUN_DRAW: Vec2 = Vec2::ZERO;
+/// Sun animation speed, frames per second.
+const SUN_RATE: f32 = 6.0;
 const MOWER_DRAW_Y: f32 = 23.0;
 /// The picked-up plant is drawn at the cursor minus (25, 35) (the cursor
 /// object) minus (10, 25) (its draw offset).
@@ -94,7 +94,8 @@ const Z_PLANT: f32 = 10.0;
 const Z_PREVIEW: f32 = 15.5;
 const Z_ZOMBIE: f32 = 20.0;
 const Z_PEA: f32 = 40.0;
-const Z_SUN: f32 = 60.0;
+/// Suns fly over the seed bank and its counter, like the original's coins.
+const Z_SUN: f32 = 92.0;
 const Z_BANK: f32 = 80.0;
 const Z_TEXT: f32 = 90.0;
 const Z_HELD: f32 = 95.0;
@@ -547,6 +548,7 @@ fn sync_views(
     )>,
     mut transforms: Query<&mut Transform>,
     plant_heads: Query<&PlantHead>,
+    mut sun_looks: Query<(&mut ReanimScale, &mut ReanimAlpha)>,
 ) {
     let board = &mut *board;
     let sim = &board.sim;
@@ -693,18 +695,28 @@ fn sync_views(
         }
     }
     for s in &sim.suns {
-        let origin = Vec2::new(s.x, s.y) + SUN_DRAW;
+        let (cx, cy) = s.centre();
+        let origin = Vec2::new(cx, cy);
         match board.views.get(&s.id) {
             Some(&e) => {
                 if let Ok((_, mut o, _)) = players.get_mut(e) {
                     o.0 = origin;
+                }
+                if let Ok((mut scale, mut alpha)) = sun_looks.get_mut(e) {
+                    scale.0 = s.scale();
+                    alpha.0 = s.alpha();
                 }
             }
             None => {
                 let Some(def) = board.defs.get(SUN) else {
                     continue;
                 };
-                let e = spawn_reanim_view(&mut commands, def, origin, Z_SUN, &|_| {});
+                let e = spawn_reanim_view(&mut commands, def, origin, Z_SUN, &|pl| {
+                    pl.layers[0].rate = Some(SUN_RATE);
+                });
+                commands
+                    .entity(e)
+                    .insert((ReanimScale(s.scale()), ReanimAlpha(s.alpha())));
                 board.views.insert(s.id, e);
             }
         }
